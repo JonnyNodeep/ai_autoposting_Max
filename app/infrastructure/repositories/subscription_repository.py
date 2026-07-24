@@ -1,0 +1,75 @@
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.domain.entities.subscription import Subscription
+from app.domain.interfaces.subscription_repository import SubscriptionRepository
+from app.domain.value_objects.subscription_tier import SubscriptionTier
+from app.domain.value_objects.subscription_status import SubscriptionStatus
+from app.infrastructure.models.subscription import SubscriptionModel
+
+
+class SQLAlchemySubscriptionRepository(SubscriptionRepository):
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_active_by_user(self, user_id: int) -> Subscription | None:
+        stmt = select(SubscriptionModel).where(
+            SubscriptionModel.user_id == user_id,
+            SubscriptionModel.status.in_([SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE]),
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
+    async def get_by_id(self, subscription_id: int) -> Subscription | None:
+        stmt = select(SubscriptionModel).where(SubscriptionModel.id == subscription_id)
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
+    async def create(self, subscription: Subscription) -> Subscription:
+        model = SubscriptionModel(
+            user_id=subscription.user_id,
+            tier=subscription.tier.value,
+            status=subscription.status.value,
+            channels_limit=subscription.tier.channels_limit,
+            expires_at=subscription.expires_at,
+        )
+        self._session.add(model)
+        await self._session.flush()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
+    async def update(self, subscription: Subscription) -> Subscription:
+        await self._session.execute(
+            update(SubscriptionModel)
+            .where(SubscriptionModel.id == subscription.id)
+            .values(
+                tier=subscription.tier.value,
+                status=subscription.status.value,
+                channels_limit=subscription.tier.channels_limit,
+                expires_at=subscription.expires_at,
+            )
+        )
+        await self._session.flush()
+        return subscription
+
+    async def deactivate(self, user_id: int) -> None:
+        await self._session.execute(
+            update(SubscriptionModel)
+            .where(SubscriptionModel.user_id == user_id)
+            .values(status=SubscriptionStatus.EXPIRED.value)
+        )
+        await self._session.flush()
+
+    @staticmethod
+    def _to_entity(model: SubscriptionModel) -> Subscription:
+        return Subscription(
+            id=model.id,
+            user_id=model.user_id,
+            tier=SubscriptionTier(model.tier),
+            status=SubscriptionStatus(model.status),
+            channels_limit=model.channels_limit,
+            started_at=model.started_at,
+            expires_at=model.expires_at,
+        )
