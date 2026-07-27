@@ -127,3 +127,30 @@ def _apply_watermark(filepath: str, slug: str) -> None:
     draw.text((x, y), slug, font=font, fill=(255, 255, 255, 200))
     combined = Image.alpha_composite(img, overlay)
     combined.save(filepath, "PNG")
+
+
+def _apply_video_watermark(input_path: str, output_path: str, slug: str) -> None:
+    import subprocess
+
+    escaped = slug.replace(":", "\\:").replace("'", "\\'")
+    drawtext = (
+        f"drawtext=text='{escaped}':"
+        f"fontsize=9:"
+        f"fontcolor=white@0.8:"
+        f"box=1:boxcolor=black@0.4:boxborderw=5:"
+        f"x=w-tw-10:y=h-th-10"
+    )
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-i", input_path,
+            "-vf", drawtext,
+            "-codec:a", "copy",
+            "-y", output_path,
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logger.error(f"ffmpeg watermark failed: {result.stderr[:300]}")
+        raise RuntimeError(f"Video watermark failed")
+    logger.info(f"Video watermarked: {input_path} -> {output_path}")

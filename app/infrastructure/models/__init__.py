@@ -7,9 +7,11 @@ from app.infrastructure.models.content_post import ContentPostModel
 from app.infrastructure.models.publish_schedule import PublishScheduleModel
 from app.infrastructure.models.payment import PaymentModel
 from app.infrastructure.models.generation_log import GenerationLogModel
+from app.infrastructure.models.pipeline_run import PipelineRunModel
 
 __all__ = [
     "UserModel", "ChannelModel", "SubscriptionModel",
     "ContentPlanModel", "ContentTopicModel", "ContentPostModel",
     "PublishScheduleModel", "PaymentModel", "GenerationLogModel",
+    "PipelineRunModel",
 ]

@@ -9,7 +9,7 @@ from app.bot.dispatcher import UpdateDispatcher
 from app.bot.handlers import register_handlers
 from app.presentation.api.router import api_router
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
-from app.infrastructure.scheduler.service import SchedulerService
+from app.infrastructure.scheduler.service import SchedulerService, scheduler_service
 from app.infrastructure.database.session import engine
 from app.infrastructure.redis.client import redis_client
 from app.config import settings
@@ -24,9 +24,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dispatcher = dispatcher
     app.state.max_client = MaxAPIHTTPClient()
 
-    scheduler = SchedulerService()
-    scheduler.start()
-    app.state.scheduler = scheduler
+    scheduler_service.start()
+    await scheduler_service.load_active_pipelines()
+    app.state.scheduler = scheduler_service
 
     max_client = app.state.max_client
     if settings.app.webhook_url:
@@ -43,8 +43,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    scheduler: SchedulerService = app.state.scheduler
-    scheduler.stop()
+    scheduler_service.stop()
     max_client: MaxAPIHTTPClient = app.state.max_client
     await max_client.close()
     await engine.dispose()

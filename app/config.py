@@ -69,6 +69,13 @@ class AdminSettings(BaseSettings):
     api_token: str = Field(default="", alias="ADMIN_API_TOKEN")
 
 
+class VidGoSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    api_key: str = Field(default="", alias="VIDGO_API_KEY")
+    callback_url: str = Field(default="", alias="VIDGO_CALLBACK_URL")
+
+
 class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     postgres: PostgresSettings = PostgresSettings()
@@ -77,6 +84,7 @@ class Settings(BaseSettings):
     openai: OpenAISettings = OpenAISettings()
     yookassa: YooKassaSettings = YooKassaSettings()
     admin: AdminSettings = AdminSettings()
+    vidgo: VidGoSettings = VidGoSettings()
 
 
 @lru_cache

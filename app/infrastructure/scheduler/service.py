@@ -311,3 +311,167 @@ class SchedulerService:
                 await error_notifier.notify(e, "scheduler.check_expired_subscriptions")
             except Exception:
                 pass
+
+    def add_pipeline_job(self, run_id: int, times: list[str], channel_link: str = "") -> None:
+        job_id = f"pipeline_{run_id}"
+        if self._scheduler.get_job(job_id):
+            self._scheduler.remove_job(job_id)
+
+        for time_str in times:
+            parts = time_str.split(":")
+            h = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 else 0
+            self._scheduler.add_job(
+                self.run_pipeline_step,
+                "cron",
+                hour=h,
+                minute=m,
+                id=f"{job_id}_{h:02d}{m:02d}",
+                args=[run_id],
+                max_instances=1,
+                replace_existing=True,
+                timezone="UTC",
+            )
+        logger.info(f"Pipeline {run_id} scheduled at {times}")
+
+    def remove_pipeline_job(self, run_id: int) -> None:
+        for job in list(self._scheduler.get_jobs()):
+            if job.id.startswith(f"pipeline_{run_id}"):
+                self._scheduler.remove_job(job.id)
+        logger.info(f"Pipeline {run_id} removed from scheduler")
+
+    async def load_active_pipelines(self) -> None:
+        try:
+            async with async_session_factory() as session:
+                from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
+                repo = SQLAPipelineRunRepository(session)
+                active = await repo.get_all_active()
+                for run in active:
+                    if run.id and run.times:
+                        self.add_pipeline_job(run.id, run.times, run.channel_link)
+                logger.info(f"Loaded {len(active)} active pipelines into scheduler")
+        except Exception as e:
+            logger.exception(f"Failed to load active pipelines: {e}")
+
+    async def run_pipeline_step(self, run_id: int) -> None:
+        try:
+            async with async_session_factory() as session:
+                from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
+                from app.infrastructure.services.openai_client import OpenAIService
+                from app.infrastructure.services.vidgo_client import VidGoClient
+                from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
+
+                repo = SQLAPipelineRunRepository(session)
+                run = await repo.get_by_id(run_id)
+                if not run or run.status.value != "active":
+                    return
+
+                ch_repo = SQLAlchemyChannelRepository(session)
+                channel = await ch_repo.get_by_id(run.channel_id)
+                if not channel:
+                    return
+
+                blocks = run.blocks_config or {}
+                max_client = MaxAPIHTTPClient()
+                openai_client = OpenAIService()
+
+                prompt_block = blocks.get("image_prompt", {})
+                prompt_text = prompt_block.get("generated_prompt", "")
+                image_url = ""
+                if prompt_text:
+                    image_url = await openai_client.generate_image(
+                        prompt=prompt_text, channel_link=None
+                    )
+
+                video_token = ""
+                video_block = blocks.get("video_gen", {})
+                if video_block.get("enabled") and video_block.get("generated_prompt") and image_url:
+                    try:
+                        vidgo = VidGoClient()
+                        if not (image_url.startswith("http://") or image_url.startswith("https://")):
+                            vidgo_image_url = await vidgo.upload_image(image_url)
+                        else:
+                            vidgo_image_url = image_url
+
+                        task_id = await vidgo.submit_video(
+                            model=video_block.get("model", "grok-imagine"),
+                            prompt=video_block["generated_prompt"],
+                            image_url=vidgo_image_url,
+                            duration=video_block.get("duration", 6),
+                            mode=video_block.get("mode", "normal"),
+                            resolution=video_block.get("resolution", "720p"),
+                        )
+
+                        import asyncio as asyncio_mod
+                        deadline = datetime.now(UTC).timestamp() + 900
+                        while True:
+                            task = await vidgo.get_task_status(task_id)
+                            if task["status"] == "finished":
+                                video_url = task["files"][0]["file_url"]
+                                break
+                            if task["status"] == "failed":
+                                raise RuntimeError(task.get("error_message", "failed"))
+                            if datetime.now(UTC).timestamp() > deadline:
+                                raise TimeoutError("timeout")
+                            await asyncio_mod.sleep(5)
+
+                        import tempfile, httpx
+                        from pathlib import Path as P
+                        tmp_path = None
+                        try:
+                            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
+                                dl_response = await dl_client.get(video_url)
+                                dl_response.raise_for_status()
+                            suffix = P(video_url).suffix or ".mp4"
+                            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                                f.write(dl_response.content)
+                                tmp_path = f.name
+
+                            if run.channel_link:
+                                from app.infrastructure.services.openai_client import _apply_video_watermark
+                                slug = run.channel_link.rstrip("/").split("/")[-1]
+                                watermarked = str(P(tmp_path).parent / f"wm_{P(tmp_path).name}")
+                                _apply_video_watermark(tmp_path, watermarked, slug)
+                                P(tmp_path).unlink()
+                                tmp_path = watermarked
+
+                            video_token = await max_client.upload_file(tmp_path, "video")
+                        finally:
+                            if tmp_path:
+                                try: P(tmp_path).unlink()
+                                except Exception: pass
+                        await vidgo.close()
+                    except Exception as e:
+                        logger.exception(f"Pipeline {run_id}: video failed: {e}")
+
+                post_block = blocks.get("post_gen", {})
+                if post_block.get("enabled") and post_block.get("generated_post"):
+                    post_text = post_block["generated_post"]
+                    if post_block.get("add_channel_link") and run.channel_link:
+                        post_text += f"\n\n**👉 [Подпишись на канал]({run.channel_link})**"
+
+                    attachments = []
+                    if video_token:
+                        attachments.append({"type": "video", "payload": {"token": video_token}})
+
+                    await max_client.send_message(
+                        chat_id=channel.max_chat_id,
+                        text=post_text[:3800],
+                        attachments=attachments if attachments else None,
+                        fmt="markdown",
+                    )
+
+                now = datetime.now(UTC)
+                run.last_run_at = now
+                from app.application.pipeline.manage_pipeline import PipelineManager
+                if run.times:
+                    run.next_run_at = PipelineManager._calc_next_run(run.times, now)
+                await repo.update(run)
+
+                await max_client.close()
+                logger.info(f"Pipeline {run_id} step completed")
+        except Exception as e:
+            logger.exception(f"Pipeline {run_id} step failed: {e}")
+
+
+scheduler_service = SchedulerService()

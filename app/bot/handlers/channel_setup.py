@@ -149,6 +149,14 @@ def register_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
 
                 redis = await get_redis()
+                if await redis.get(f"ai_image_prompt_wait:{max_user_id}"):
+                    return
+                if await redis.get(f"ai_video_prompt_wait:{max_user_id}"):
+                    return
+                if await redis.get(f"ai_post_gen_wait:{max_user_id}"):
+                    return
+                if await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
+                    return
                 prefs_key = f"content_plan_prefs:{max_user_id}"
                 prefs_data = await redis.get(prefs_key)
                 if prefs_data and message_text:
@@ -840,6 +848,14 @@ def register_handlers(dispatcher: UpdateDispatcher) -> None:
 
                         await channel_repo.delete(channel_id)
                         await session.commit()
+
+                        from app.bot.states.ai_studio import AIStudioFSM
+                        try:
+                            sf = AIStudioFSM()
+                            await sf.remove_channel_pipeline(max_user_id, channel_id)
+                        except Exception:
+                            pass
+
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text="Канал и все его данные удалены.",

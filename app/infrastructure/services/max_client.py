@@ -61,6 +61,8 @@ class MaxAPIHTTPClient(MaxAPIClient):
         response = await self._client.request(
             method=method, url=path, params=params, json=json
         )
+        if response.status_code >= 400:
+            logger.error(f"MAX API {method} {path} status={response.status_code} body={response.text[:500]}")
         response.raise_for_status()
         return response.json()
 
@@ -144,11 +146,15 @@ class MaxAPIHTTPClient(MaxAPIClient):
                 )
             upload_result.raise_for_status()
 
-        result = upload_result.json()
-        if "photos" in result:
-            for photo_data in result["photos"].values():
-                return photo_data["token"]
-        return result["token"]
+        try:
+            result = upload_result.json()
+            if "photos" in result:
+                for photo_data in result["photos"].values():
+                    return photo_data["token"]
+            return result.get("token", "")
+        except Exception:
+            logger.warning(f"Upload response not JSON, body={upload_result.text[:200]}")
+            return upload_response.get("token", "")
 
     async def get_me(self) -> dict[str, Any]:
         return await self._request("GET", "/me")
