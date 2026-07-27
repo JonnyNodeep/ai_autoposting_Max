@@ -1,5 +1,4 @@
 import mimetypes
-import os
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +8,7 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
+    retry_if_exception,
 )
 
 from app.config import settings
@@ -21,6 +20,15 @@ def _get_verify_path() -> str | bool:
     if cert_path.exists():
         return str(cert_path)
     return True
+
+
+def _is_retryable_max_error(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 408 or status == 429 or status >= 500
+    return False
 
 
 class MaxAPIHTTPClient(MaxAPIClient):
@@ -40,7 +48,7 @@ class MaxAPIHTTPClient(MaxAPIClient):
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable_max_error),
     )
     async def _request(
         self,

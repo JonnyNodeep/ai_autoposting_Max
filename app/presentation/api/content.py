@@ -15,6 +15,12 @@ from app.application.content.generate_content import (
     GenerateImageForPostUseCase,
     PublishPostUseCase,
 )
+from app.presentation.api.authz import (
+    ensure_channel_owner,
+    ensure_plan_owner,
+    ensure_post_owner,
+    ensure_topic_owner,
+)
 from app.presentation.api.dependencies import require_api_token
 from app.infrastructure.rate_limit import rate_limit
 from app.presentation.schemas.channel import (
@@ -34,8 +40,9 @@ content_router = APIRouter(
 
 
 @content_router.get("/channels/{channel_id}/plans", response_model=list[PlanResponse])
-async def list_plans(channel_id: int) -> list[PlanResponse]:
+async def list_plans(channel_id: int, owner_id: int) -> list[PlanResponse]:
     async for session in get_session():
+        await ensure_channel_owner(session, channel_id, owner_id)
         repo = SQLAContentPlanRepository(session)
         plans = await repo.get_by_channel(channel_id)
         return [
@@ -51,9 +58,10 @@ async def list_plans(channel_id: int) -> list[PlanResponse]:
 
 
 @content_router.post("/channels/{channel_id}/plans", response_model=PlanResponse)
-async def create_plan(channel_id: int, body: PlanCreateRequest, request: Request) -> PlanResponse:
+async def create_plan(channel_id: int, body: PlanCreateRequest, request: Request, owner_id: int) -> PlanResponse:
     await rate_limit(request, limit=10, window=60)
     async for session in get_session():
+        await ensure_channel_owner(session, channel_id, owner_id)
         plan_repo = SQLAContentPlanRepository(session)
         topic_repo = SQLAContentTopicRepository(session)
         channel_repo = SQLAlchemyChannelRepository(session)
@@ -73,8 +81,9 @@ async def create_plan(channel_id: int, body: PlanCreateRequest, request: Request
 
 
 @content_router.get("/plans/{plan_id}/topics", response_model=list[TopicResponse])
-async def list_topics(plan_id: int) -> list[TopicResponse]:
+async def list_topics(plan_id: int, owner_id: int) -> list[TopicResponse]:
     async for session in get_session():
+        await ensure_plan_owner(session, plan_id, owner_id)
         repo = SQLAContentTopicRepository(session)
         topics = await repo.get_by_plan(plan_id)
         return [
@@ -92,8 +101,9 @@ async def list_topics(plan_id: int) -> list[TopicResponse]:
 
 
 @content_router.patch("/topics/{topic_id}", response_model=TopicResponse)
-async def update_topic(topic_id: int, body: TopicUpdateRequest) -> TopicResponse:
+async def update_topic(topic_id: int, body: TopicUpdateRequest, owner_id: int) -> TopicResponse:
     async for session in get_session():
+        await ensure_topic_owner(session, topic_id, owner_id)
         repo = SQLAContentTopicRepository(session)
         topic = await repo.get_by_id(topic_id)
         if not topic:
@@ -114,8 +124,9 @@ async def update_topic(topic_id: int, body: TopicUpdateRequest) -> TopicResponse
 
 
 @content_router.delete("/topics/{topic_id}")
-async def delete_topic(topic_id: int) -> dict:
+async def delete_topic(topic_id: int, owner_id: int) -> dict:
     async for session in get_session():
+        await ensure_topic_owner(session, topic_id, owner_id)
         repo = SQLAContentTopicRepository(session)
         await repo.delete(topic_id)
         await session.commit()
@@ -123,15 +134,17 @@ async def delete_topic(topic_id: int) -> dict:
 
 
 @content_router.post("/topics/{topic_id}/generate-post", response_model=PostResponse)
-async def generate_post(topic_id: int, request: Request) -> PostResponse:
+async def generate_post(topic_id: int, request: Request, owner_id: int) -> PostResponse:
     await rate_limit(request, limit=20, window=60)
     async for session in get_session():
+        plan_repo = SQLAContentPlanRepository(session)
+        await ensure_topic_owner(session, topic_id, owner_id)
         channel_repo = SQLAlchemyChannelRepository(session)
         post_repo = SQLAContentPostRepository(session)
         topic_repo = SQLAContentTopicRepository(session)
         openai_client = OpenAIService()
 
-        uc = GeneratePostUseCase(channel_repo, post_repo, topic_repo, openai_client)
+        uc = GeneratePostUseCase(plan_repo, channel_repo, post_repo, topic_repo, openai_client)
         post = await uc.execute(topic_id)
         await session.commit()
 
@@ -148,9 +161,10 @@ async def generate_post(topic_id: int, request: Request) -> PostResponse:
 
 
 @content_router.post("/posts/{post_id}/generate-image", response_model=PostResponse)
-async def generate_image(post_id: int, request: Request) -> PostResponse:
+async def generate_image(post_id: int, request: Request, owner_id: int) -> PostResponse:
     await rate_limit(request, limit=20, window=60)
     async for session in get_session():
+        await ensure_post_owner(session, post_id, owner_id)
         post_repo = SQLAContentPostRepository(session)
         openai_client = OpenAIService()
 
@@ -172,8 +186,9 @@ async def generate_image(post_id: int, request: Request) -> PostResponse:
 
 
 @content_router.post("/posts/{post_id}/publish")
-async def publish_post(post_id: int, body: PublishRequest) -> dict:
+async def publish_post(post_id: int, body: PublishRequest, owner_id: int) -> dict:
     async for session in get_session():
+        await ensure_post_owner(session, post_id, owner_id)
         post_repo = SQLAContentPostRepository(session)
         max_client = MaxAPIHTTPClient()
 

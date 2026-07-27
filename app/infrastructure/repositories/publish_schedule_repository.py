@@ -80,6 +80,7 @@ class SQLAPublishScheduleRepository(PublishScheduleRepository):
             .values(
                 post_id=schedule.post_id,
                 scheduled_at=schedule.scheduled_at,
+                auto_publish=schedule.auto_publish,
                 status=schedule.status.value,
                 sent_to_owner_at=schedule.sent_to_owner_at,
                 confirmed_at=schedule.confirmed_at,

@@ -20,15 +20,14 @@ from app.domain.entities.publish_schedule import ScheduleStatus
 
 
 def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
-    @dispatcher.register(UpdateType.MESSAGE_CALLBACK)
+    @dispatcher.register(UpdateType.MESSAGE_CALLBACK, prefixes=["schedule:"])
     async def on_schedule_callback(update: dict) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))
-        chat_id = update.get("chat_id")
-        user_data = cb.get("user", {}) or update.get("user", {})
+        user_data = cb.get("user", {}) or update.get("user", {}) or update.get("message", {}).get("sender", {})
         max_user_id = user_data.get("user_id")
 
-        if not callback_data or not chat_id:
+        if not callback_data or not max_user_id:
             return
 
         async with async_session_factory() as session:
@@ -61,8 +60,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                 if callback_data.startswith("schedule:show:"):
                     post_id = int(callback_data.split(":")[2])
                     if not await _can_manage_post(post_id):
-                        await max_client.send_message(
-                            chat_id=chat_id,
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
                             text="Нет доступа к этому посту.",
                         )
                         return
@@ -82,8 +81,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                         builder.row((label, f"schedule:date:{post_id}:{d.isoformat()}"))
                     builder.row(("На главную", "main_menu"))
 
-                    await max_client.send_message(
-                        chat_id=chat_id,
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
                         text=f"Выбери дату для публикации поста *{post.title[:50]}*:",
                         attachments=[builder.build()],
                         fmt="markdown",
@@ -94,8 +93,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                     post_id = int(parts[2])
                     date_str = parts[3]
                     if not await _can_manage_post(post_id):
-                        await max_client.send_message(
-                            chat_id=chat_id,
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
                             text="Нет доступа к этому посту.",
                         )
                         return
@@ -106,8 +105,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                         builder.row((f"{hour}:00", f"schedule:set:{post_id}:{time_str}"))
                     builder.row(("На главную", "main_menu"))
 
-                    await max_client.send_message(
-                        chat_id=chat_id,
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
                         text="Выбери время (UTC):",
                         attachments=[builder.build()],
                     )
@@ -117,8 +116,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                     post_id = int(parts[2])
                     time_str = parts[3]
                     if not await _can_manage_post(post_id):
-                        await max_client.send_message(
-                            chat_id=chat_id,
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
                             text="Нет доступа к этому посту.",
                         )
                         return
@@ -129,7 +128,7 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                     channel = await channel_repo.get_by_id(plan.channel_id) if plan else None
 
                     if not channel:
-                        await max_client.send_message(chat_id=chat_id, text="Канал не найден")
+                        await max_client.send_message_to_user(user_id=max_user_id, text="Канал не найден")
                         return
 
                     try:
@@ -141,8 +140,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                     sched = await uc.execute(post_id, channel.id, scheduled_at)
                     await session.commit()
 
-                    await max_client.send_message(
-                        chat_id=chat_id,
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
                         text=(
                             f"Пост запланирован на *{scheduled_at.strftime('%d.%m.%Y %H:%M')}* (UTC).\n"
                             f"Я пришлю его тебе на подтверждение в это время."
@@ -150,6 +149,101 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                         attachments=[InlineKeyboardBuilder.main_menu()],
                         fmt="markdown",
                     )
+
+                elif callback_data.startswith("schedule:review:"):
+                    sched_id = int(callback_data.split(":")[2])
+                    sched = await schedule_repo.get_by_id(sched_id)
+                    if not sched or not sched.post_id:
+                        return
+                    channel = await channel_repo.get_by_id(sched.channel_id)
+                    if not user or not channel or channel.owner_id != user.id:
+                        return
+                    await _resend_review(sched, post_repo, max_client, max_user_id)
+
+                elif callback_data.startswith("schedule:edit:"):
+                    parts = callback_data.split(":")
+                    if len(parts) == 3:
+                        sched_id = int(parts[2])
+                        sched = await schedule_repo.get_by_id(sched_id)
+                        if not sched or not sched.post_id:
+                            return
+                        channel = await channel_repo.get_by_id(sched.channel_id)
+                        if not user or not channel or channel.owner_id != user.id:
+                            return
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Что изменить в посте?",
+                            attachments=[InlineKeyboardBuilder.schedule_edit_options(sched_id)],
+                        )
+                    elif len(parts) >= 4:
+                        sched_id = int(parts[2])
+                        edit_type = parts[3]
+                        sched = await schedule_repo.get_by_id(sched_id)
+                        if not sched or not sched.post_id:
+                            return
+                        channel = await channel_repo.get_by_id(sched.channel_id)
+                        if not user or not channel or channel.owner_id != user.id:
+                            return
+
+                        if edit_type == "custom":
+                            from app.infrastructure.redis.client import get_redis
+                            redis = await get_redis()
+                            await redis.setex(f"schedule_edit:{max_user_id}", 1800, str(sched_id))
+                            await max_client.send_message_to_user(
+                                user_id=max_user_id,
+                                text="Опиши, что нужно изменить в посте. Например: «Сделай заголовок короче и добавь эмодзи».",
+                                attachments=[InlineKeyboardBuilder()
+                                    .row(("Отмена", f"schedule:review:{sched_id}"))
+                                    .build()],
+                            )
+                            return
+
+                        from app.application.content.generate_content import EditPostUseCase
+                        post = await post_repo.get_by_id(sched.post_id)
+                        if not post:
+                            return
+                        topic = await topic_repo.get_by_id(post.topic_id)
+                        plan = await plan_repo.get_by_id(topic.plan_id) if topic else None
+                        channel2 = await channel_repo.get_by_id(plan.channel_id) if plan else None
+                        openai_client = OpenAIService()
+                        style_dict = channel2.style_profile.to_dict() if channel2 else None
+
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Редактирую пост...",
+                        )
+
+                        uc = EditPostUseCase(post_repo, openai_client)
+                        edited = await uc.execute(post.id, edit_type, style_dict)
+                        await session.commit()
+                        await _resend_review(sched, post_repo, max_client, max_user_id)
+
+                elif callback_data.startswith("schedule:image:"):
+                    sched_id = int(callback_data.split(":")[2])
+                    sched = await schedule_repo.get_by_id(sched_id)
+                    if not sched or not sched.post_id:
+                        return
+                    channel = await channel_repo.get_by_id(sched.channel_id)
+                    if not user or not channel or channel.owner_id != user.id:
+                        return
+
+                    post = await post_repo.get_by_id(sched.post_id)
+                    if not post:
+                        return
+
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text="Генерирую новую картинку...",
+                    )
+
+                    from app.application.content.generate_content import GenerateImageForPostUseCase
+                    openai_client = OpenAIService()
+                    img_uc = GenerateImageForPostUseCase(post_repo, openai_client, max_client)
+                    await img_uc.execute(post.id, channel.channel_link)
+                    await session.commit()
+
+                    post = await post_repo.get_by_id(post.id)
+                    await _resend_review(sched, post_repo, max_client, max_user_id)
 
                 elif callback_data.startswith("schedule:confirm:"):
                     sched_id = int(callback_data.split(":")[2])
@@ -159,24 +253,18 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
 
                     channel = await channel_repo.get_by_id(sched.channel_id)
                     if not user or not channel or channel.owner_id != user.id:
-                        if max_user_id:
-                            await max_client.send_message_to_user(
-                                user_id=max_user_id,
-                                text="Нет доступа к этой публикации.",
-                            )
-                        else:
-                            await max_client.send_message(
-                                chat_id=chat_id,
-                                text="Нет доступа к этой публикации.",
-                            )
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Нет доступа к этой публикации.",
+                        )
                         return
 
                     uc = ConfirmPublishUseCase(schedule_repo, post_repo, channel_repo, max_client)
                     await uc.execute(sched_id)
                     await session.commit()
 
-                    await max_client.send_message(
-                        chat_id=chat_id,
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
                         text="Опубликовано! Пост в канале.",
                         attachments=[InlineKeyboardBuilder.main_menu()],
                     )
@@ -193,8 +281,8 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                                     text="Нет доступа к этой публикации.",
                                 )
                             else:
-                                await max_client.send_message(
-                                    chat_id=chat_id,
+                                await max_client.send_message_to_user(
+                                    user_id=max_user_id,
                                     text="Нет доступа к этой публикации.",
                                 )
                             return
@@ -202,19 +290,58 @@ def register_schedule_handlers(dispatcher: UpdateDispatcher) -> None:
                         await schedule_repo.update(sched)
                         await session.commit()
 
-                    await max_client.send_message(
-                        chat_id=chat_id,
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
                         text="Публикация пропущена.",
                         attachments=[InlineKeyboardBuilder.main_menu()],
                     )
 
             except Exception:
                 logger.exception(f"Error handling schedule callback: {callback_data}")
-                await max_client.send_message(
-                    chat_id=chat_id,
+                await max_client.send_message_to_user(
+                    user_id=max_user_id,
                     text="Произошла ошибка. Попробуй ещё раз.",
                     attachments=[InlineKeyboardBuilder.main_menu()],
                 )
 
             await max_client.close()
             await session.commit()
+
+
+async def _resend_review(sched, post_repo, max_client, max_user_id: int) -> None:
+    post = await post_repo.get_by_id(sched.post_id)
+    if not post:
+        return
+
+    from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
+    from app.infrastructure.database.session import async_session_factory
+    ch_title = ""
+    async with async_session_factory() as sess:
+        ch_repo = SQLAlchemyChannelRepository(sess)
+        ch = await ch_repo.get_by_id(sched.channel_id)
+        if ch:
+            ch_title = ch.title
+
+    text_body = post.text[:2000] + ('...' if len(post.text) > 2000 else '')
+    cta_line = f"_{post.cta}_" if post.cta and post.cta not in post.text else ""
+    header = f"*Готово к публикации — {ch_title}*" if ch_title else "*Готово к публикации*"
+    text = (
+        f"{header}\n\n"
+        f"*{post.title}*\n\n"
+        f"{text_body}"
+    )
+    if cta_line:
+        text += f"\n\n{cta_line}"
+
+    attachments = []
+    if post.image_url:
+        payload = {"token": post.image_url} if "/app/uploads/" not in (post.image_url or "") else {"url": post.image_url}
+        attachments.append({"type": "image", "payload": payload})
+    attachments.append(InlineKeyboardBuilder.schedule_review(sched.id))
+
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=text,
+        attachments=attachments if attachments else None,
+        fmt="markdown",
+    )

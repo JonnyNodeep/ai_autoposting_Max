@@ -2,6 +2,7 @@ from loguru import logger
 
 from app.infrastructure.database.session import async_session_factory
 from app.infrastructure.repositories.content_repository import (
+    SQLAContentPlanRepository,
     SQLAContentPostRepository,
     SQLAContentTopicRepository,
 )
@@ -13,12 +14,13 @@ from app.application.content.generate_content import GeneratePostUseCase, Genera
 async def generate_post_task(topic_id: int) -> dict:
     logger.info(f"ARQ task: generate post for topic {topic_id}")
     async with async_session_factory() as session:
+        plan_repo = SQLAContentPlanRepository(session)
         channel_repo = SQLAlchemyChannelRepository(session)
         post_repo = SQLAContentPostRepository(session)
         topic_repo = SQLAContentTopicRepository(session)
         openai_client = OpenAIService()
 
-        uc = GeneratePostUseCase(channel_repo, post_repo, topic_repo, openai_client)
+        uc = GeneratePostUseCase(plan_repo, channel_repo, post_repo, topic_repo, openai_client)
         post = await uc.execute(topic_id)
         await session.commit()
 

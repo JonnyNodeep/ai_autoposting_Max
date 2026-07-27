@@ -23,7 +23,7 @@ TESTPOST_DEDUP_TTL_SECONDS = 24 * 60 * 60
 
 
 def register_admin_handlers(dispatcher: UpdateDispatcher) -> None:
-    @dispatcher.register(UpdateType.MESSAGE_CALLBACK)
+    @dispatcher.register(UpdateType.MESSAGE_CALLBACK, prefixes=["admin:"])
     async def on_admin_callback(update: dict) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))
@@ -300,10 +300,11 @@ def register_admin_handlers(dispatcher: UpdateDispatcher) -> None:
                         text="Генерирую тестовый пост...",
                     )
                     channel_repo2 = SQLAlchemyChannelRepository(session)
+                    plan_repo2 = SQLAContentPlanRepository(session)
                     topic_repo = SQLAContentTopicRepository(session)
                     post_repo = SQLAContentPostRepository(session)
                     openai_client = OpenAIService()
-                    uc = GeneratePostUseCase(channel_repo2, post_repo, topic_repo, openai_client)
+                    uc = GeneratePostUseCase(plan_repo2, channel_repo2, post_repo, topic_repo, openai_client)
                     post = await uc.execute(topic_id)
                     await session.commit()
                     img_uc = GenerateImageForPostUseCase(post_repo, openai_client, max_client)

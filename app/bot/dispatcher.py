@@ -3,10 +3,6 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from app.domain.entities.user import User
-from app.domain.entities.channel import Channel
-from app.domain.interfaces.max_client import MaxAPIClient
-
 
 type Update = dict[str, Any]
 type Handler = Callable[[Update], Any]
@@ -28,21 +24,30 @@ class UpdateType(StrEnum):
 
 class UpdateDispatcher:
     def __init__(self) -> None:
-        self._handlers: dict[UpdateType, list[Handler]] = {}
+        self._handlers: dict[UpdateType, list[tuple[Handler, list[str] | None]]] = {}
 
-    def register(self, update_type: UpdateType) -> Callable[[Handler], Handler]:
+    def register(self, update_type: UpdateType, prefixes: list[str] | None = None) -> Callable[[Handler], Handler]:
         def decorator(handler: Handler) -> Handler:
             if update_type not in self._handlers:
                 self._handlers[update_type] = []
-            self._handlers[update_type].append(handler)
+            self._handlers[update_type].append((handler, prefixes))
             return handler
         return decorator
 
     async def dispatch(self, update: Update) -> list[Any]:
         update_type = UpdateType(update["update_type"])
-        handlers = self._handlers.get(update_type, [])
+        entries = self._handlers.get(update_type, [])
+
+        if update_type == UpdateType.MESSAGE_CALLBACK:
+            cb = update.get("callback", {})
+            callback_data = str(cb.get("payload", ""))
+            entries = [
+                (h, p) for (h, p) in entries
+                if p is None or any(callback_data.startswith(prefix) for prefix in p)
+            ]
+
         results = []
-        for handler in handlers:
+        for handler, _ in entries:
             try:
                 result = await handler(update)
                 results.append(result)
@@ -50,7 +55,7 @@ class UpdateDispatcher:
                 logger.exception(f"Error handling update type={update_type}")
                 try:
                     from app.infrastructure.services.error_notifier import error_notifier
-                    ctx = f"update_type={update_type} update={str(update)[:500]}"
+                    ctx = f"update_type={update_type}"
                     await error_notifier.notify(e, ctx)
                 except Exception:
                     pass

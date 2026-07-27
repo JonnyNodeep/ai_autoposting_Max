@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, UTC, timedelta
 
 from loguru import logger
@@ -26,14 +27,21 @@ class GenerateTopicsUseCase:
         self._channel_repo = channel_repo
         self._openai = openai_client
 
-    async def execute(self, channel_id: int, duration_days: int, user_prefs: str | None = None) -> list[str]:
+    async def execute(self, channel_id: int, duration_days: int, user_prefs: str | None = None,
+                      post_settings: dict | None = None) -> list[str]:
         channel = await self._channel_repo.get_by_id(channel_id)
         if not channel:
             raise ValueError(f"Channel {channel_id} not found")
 
-        topic_count = duration_days
-        if duration_days > 14:
-            topic_count = max(14, duration_days // 2)
+        freq = (post_settings or {}).get("frequency") or channel.content_frequency or "daily"
+        slots_per_day = {"2x_day": 2, "3x_day": 3}.get(freq, 1)
+        topic_count = duration_days * slots_per_day
+
+        search_results = ""
+        if post_settings and post_settings.get("search_enabled"):
+            topics = channel.style_profile.topics or [channel.topic or channel.title]
+            query = f"найди актуальную информацию по темам: {', '.join(topics[:5])}"
+            search_results = await self._openai.search_web(query)
 
         system, user = ContentPrompts.generate_topics(
             title=channel.title,
@@ -42,6 +50,7 @@ class GenerateTopicsUseCase:
             duration_days=duration_days,
             topic_count=topic_count,
             user_prefs=user_prefs,
+            search_results=search_results,
         )
 
         response = await self._openai.generate_text(prompt=user, system_prompt=system)
@@ -67,7 +76,7 @@ class CreateContentPlanUseCase:
 
     async def execute(self, channel_id: int, duration_days: int, user_prefs: str | None = None, post_settings: dict | None = None) -> ContentPlan:
         generate_uc = GenerateTopicsUseCase(self._channel_repo, self._openai)
-        topic_lines = await generate_uc.execute(channel_id, duration_days, user_prefs)
+        topic_lines = await generate_uc.execute(channel_id, duration_days, user_prefs, post_settings)
 
         plan = await self._plan_repo.create(
             ContentPlan(channel_id=channel_id, duration_days=duration_days, post_settings=post_settings or {})
@@ -97,11 +106,13 @@ class CreateContentPlanUseCase:
 class GeneratePostUseCase:
     def __init__(
         self,
+        plan_repo: ContentPlanRepository,
         channel_repo: ChannelRepository,
         post_repo: ContentPostRepository,
         topic_repo: ContentTopicRepository,
         openai_client: OpenAIClient,
     ) -> None:
+        self._plan_repo = plan_repo
         self._channel_repo = channel_repo
         self._post_repo = post_repo
         self._topic_repo = topic_repo
@@ -112,18 +123,8 @@ class GeneratePostUseCase:
         if not topic:
             raise ValueError(f"Topic {topic_id} not found")
 
-        plan = None
-        channel = None
-        from app.infrastructure.database.session import async_session_factory
-        from app.infrastructure.repositories.content_repository import SQLAContentPlanRepository
-        from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
-
-        async with async_session_factory() as session:
-            plan_repo = SQLAContentPlanRepository(session)
-            plan = await plan_repo.get_by_id(topic.plan_id)
-            if plan:
-                ch_repo = SQLAlchemyChannelRepository(session)
-                channel = await ch_repo.get_by_id(plan.channel_id)
+        plan = await self._plan_repo.get_by_id(topic.plan_id)
+        channel = await self._channel_repo.get_by_id(plan.channel_id) if plan else None
 
         if not channel:
             raise ValueError(f"Channel not found for topic {topic_id}")
@@ -141,12 +142,22 @@ class GeneratePostUseCase:
             post_settings=post_settings,
             channel_link=channel.channel_link if plan and plan.post_settings else "",
             search_results=search_results,
+            reference_post=channel.style_profile.reference_post if channel and channel.style_profile else "",
+            user_prefs=post_settings.get("user_prefs", "") if post_settings else "",
         )
 
         response = await self._openai.generate_text(prompt=user, system_prompt=system)
 
+        cleaned = response.strip()
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
+
         try:
-            data = json.loads(response)
+            data = json.loads(cleaned)
         except json.JSONDecodeError:
             data = {
                 "title": topic.topic,
@@ -165,6 +176,12 @@ class GeneratePostUseCase:
                 status=PostStatus.READY,
             )
         )
+
+        subscribe_url = channel.channel_link if plan and plan.post_settings and plan.post_settings.get("subscribe_cta") else ""
+        if subscribe_url:
+            if "Подпишись на канал" not in post.text and "Подпишитесь на канал" not in post.text:
+                post.text = post.text[:3900] + f"\n\n👉 [Подпишись на канал]({subscribe_url})"
+                await self._post_repo.update(post)
 
         topic.status = TopicStatus.APPROVED
         await self._topic_repo.update(topic)
@@ -254,7 +271,8 @@ class EditPostUseCase:
         self._post_repo = post_repo
         self._openai = openai_client
 
-    async def execute(self, post_id: int, edit_type: str, style_profile: dict | None = None) -> ContentPost:
+    async def execute(self, post_id: int, edit_type: str, style_profile: dict | None = None,
+                      custom_instruction: str | None = None) -> ContentPost:
         post = await self._post_repo.get_by_id(post_id)
         if not post:
             raise ValueError(f"Post {post_id} not found")
@@ -265,12 +283,21 @@ class EditPostUseCase:
             cta=post.cta,
             edit_type=edit_type,
             style_profile=style_profile,
+            custom_instruction=custom_instruction,
         )
 
         response = await self._openai.generate_text(prompt=user, system_prompt=system)
 
+        cleaned = response.strip()
+        cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+        cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
+
         try:
-            data = json.loads(response)
+            data = json.loads(cleaned)
             post.title = data.get("title", post.title)[:256]
             post.text = data.get("text", post.text)[:4000]
             post.cta = data.get("cta", post.cta)[:512]

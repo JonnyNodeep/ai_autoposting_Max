@@ -74,7 +74,8 @@ class ConfirmPublishUseCase:
         text = f"*{post.title}*\n\n{post.text}\n\n{post.cta}"
         attachments = []
         if post.image_url:
-            attachments.append({"type": "image", "payload": {"url": post.image_url}})
+            payload = {"token": post.image_url} if "/app/uploads/" not in (post.image_url or "") else {"url": post.image_url}
+            attachments.append({"type": "image", "payload": payload})
 
         await self._max_client.send_message(
             chat_id=channel.max_chat_id,

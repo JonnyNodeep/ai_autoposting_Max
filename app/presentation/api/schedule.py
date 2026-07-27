@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from app.infrastructure.database.session import get_session
 from app.infrastructure.repositories.publish_schedule_repository import SQLAPublishScheduleRepository
+from app.presentation.api.authz import ensure_channel_owner, ensure_schedule_owner
 from app.presentation.api.dependencies import require_api_token
 
 schedule_router = APIRouter(
@@ -12,8 +13,9 @@ schedule_router = APIRouter(
 
 
 @schedule_router.get("/channels/{channel_id}/schedule")
-async def get_channel_schedule(channel_id: int) -> list[dict]:
+async def get_channel_schedule(channel_id: int, owner_id: int) -> list[dict]:
     async for session in get_session():
+        await ensure_channel_owner(session, channel_id, owner_id)
         repo = SQLAPublishScheduleRepository(session)
         schedules = await repo.get_by_channel(channel_id)
         return [
@@ -32,9 +34,10 @@ async def get_channel_schedule(channel_id: int) -> list[dict]:
 
 
 @schedule_router.delete("/schedule/{schedule_id}")
-async def cancel_schedule(schedule_id: int) -> dict:
+async def cancel_schedule(schedule_id: int, owner_id: int) -> dict:
     async for session in get_session():
         repo = SQLAPublishScheduleRepository(session)
+        await ensure_schedule_owner(session, schedule_id, owner_id)
         await repo.delete(schedule_id)
         await session.commit()
         return {"status": "cancelled"}

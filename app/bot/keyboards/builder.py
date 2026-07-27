@@ -86,6 +86,7 @@ class InlineKeyboardBuilder:
             cls()
             .row(("Утвердить", "setup:style:approve"))
             .row(("Перегенерировать", "setup:style:regenerate"))
+            .row(("💬 Пояснения", "setup:style:prompt"))
             .row(("На главную", "main_menu"))
             .build()
         )
@@ -143,20 +144,19 @@ class InlineKeyboardBuilder:
     def plan_settings(cls, prefs: dict) -> dict[str, Any]:
         subscribe_label = "Подписка: ВКЛ" if prefs.get("subscribe_cta") else "Подписка: ВЫКЛ"
         share_label = "Поделиться: ВКЛ" if prefs.get("share_cta") else "Поделиться: ВЫКЛ"
-        style_label = "Единый стиль: ВКЛ" if prefs.get("same_style") else "Единый стиль: ВЫКЛ"
-        fmt_label = "Формат как в канале: ВКЛ" if prefs.get("match_format") else "Формат как в канале: ВЫКЛ"
-        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", True) else "💬 Комментарии: ВЫКЛ"
+        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", False) else "💬 Комментарии: ВЫКЛ"
         search_label = "🔍 Поиск в интернете: ВКЛ" if prefs.get("search_enabled") else "🔍 Поиск в интернете: ВЫКЛ"
         sources_label = "📎 Источники: ВКЛ" if prefs.get("show_sources") else "📎 Источники: ВЫКЛ"
+        review_label = "👁️ Ревью перед публикацией: ВКЛ" if prefs.get("review_enabled") else "👁️ Ревью перед публикацией: ВЫКЛ"
         return (
             cls()
             .row((subscribe_label, "plan:settings:toggle:subscribe_cta"))
             .row((share_label, "plan:settings:toggle:share_cta"))
-            .row((style_label, "plan:settings:toggle:same_style"))
-            .row((fmt_label, "plan:settings:toggle:match_format"))
             .row((comments_label, "plan:settings:toggle:comments_enabled"))
             .row((search_label, "plan:settings:toggle:search_enabled"))
             .row((sources_label, "plan:settings:toggle:show_sources"))
+            .row((review_label, "plan:settings:toggle:review_enabled"))
+            .row(("👁️ Визуальный стиль", "settings:visual"))
             .row(("Генерировать план ▶️", "plan:settings:generate"))
             .row(("На главную", "main_menu"))
             .build()
@@ -190,28 +190,47 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
-    def plan_settings_edit(cls, plan_id: int, prefs: dict) -> dict[str, Any]:
+    def plan_settings_edit(cls, plan_id: int, prefs: dict, freq_name: str = "") -> dict[str, Any]:
         subscribe_label = "Подписка: ВКЛ" if prefs.get("subscribe_cta") else "Подписка: ВЫКЛ"
         share_label = "Поделиться: ВКЛ" if prefs.get("share_cta") else "Поделиться: ВЫКЛ"
-        style_label = "Единый стиль: ВКЛ" if prefs.get("same_style") else "Единый стиль: ВЫКЛ"
-        fmt_label = "Формат как в канале: ВКЛ" if prefs.get("match_format") else "Формат как в канале: ВЫКЛ"
-        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", True) else "💬 Комментарии: ВЫКЛ"
+        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", False) else "💬 Комментарии: ВЫКЛ"
         search_label = "🔍 Поиск в интернете: ВКЛ" if prefs.get("search_enabled") else "🔍 Поиск в интернете: ВЫКЛ"
         sources_label = "📎 Источники: ВКЛ" if prefs.get("show_sources") else "📎 Источники: ВЫКЛ"
+        review_label = "👁️ Ревью перед публикацией: ВКЛ" if prefs.get("review_enabled") else "👁️ Ревью перед публикацией: ВЫКЛ"
+        freq_label = f"⏱ Частота: {freq_name}" if freq_name else "⏱ Частота"
         return (
             cls()
             .row((subscribe_label, f"plan:settings:etoggle:{plan_id}:subscribe_cta"))
             .row((share_label, f"plan:settings:etoggle:{plan_id}:share_cta"))
-            .row((style_label, f"plan:settings:etoggle:{plan_id}:same_style"))
-            .row((fmt_label, f"plan:settings:etoggle:{plan_id}:match_format"))
             .row((comments_label, f"plan:settings:etoggle:{plan_id}:comments_enabled"))
             .row((search_label, f"plan:settings:etoggle:{plan_id}:search_enabled"))
             .row((sources_label, f"plan:settings:etoggle:{plan_id}:show_sources"))
+            .row((review_label, f"plan:settings:etoggle:{plan_id}:review_enabled"))
+            .row((freq_label, f"plan:freq:{plan_id}"))
             .row(("🕐 Изменить время", f"plan:edittime:{plan_id}"))
             .row(("👁️ Визуальный стиль", f"plan:visual:{plan_id}"))
+            .row(("✏️ Ред. контент план", f"plan:edit:{plan_id}"))
             .row(("На главную", "main_menu"))
             .build()
         )
+
+    @classmethod
+    def plan_edit(cls, plan_id: int, topics: list) -> dict[str, Any]:
+        builder = cls()
+        for i, t in enumerate(topics):
+            builder.row(
+                (f"✅ {t.topic[:35]}", f"topic:approve:{t.id}:edit:{plan_id}"),
+                (f"❌", f"topic:delete:{t.id}:edit:{plan_id}"),
+            )
+        builder.row(("+ Добавить тему", f"topic:add:{plan_id}"))
+        builder.row(("💬 Уточнить пожелания", f"plan:reprefs:{plan_id}:edit"))
+        builder.row(("🔄 Перегенерировать план", f"plan:regenerate:{plan_id}"))
+        builder.row(("🚀 Утвердить план", f"plan:approve:{plan_id}"))
+        builder.row(("🕐 Изменить время", f"plan:edittime:{plan_id}"))
+        builder.row(("👁️ Визуальный стиль", f"plan:visual:{plan_id}"))
+        builder.row(("🗑 Удалить план", f"plan:delete:{plan_id}"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
 
     @classmethod
     def channel_actions(cls, channel_id: int) -> dict[str, Any]:
@@ -259,5 +278,51 @@ class InlineKeyboardBuilder:
             .row(("🖼 Картинка", f"post:image:{post_id}"))
             .row(("✅ Опубликовать", f"post:publish:{post_id}"))
             .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def schedule_review(cls, schedule_id: int) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✏️ Редактировать", f"schedule:edit:{schedule_id}"))
+            .row(("🖼 Картинка", f"schedule:image:{schedule_id}"))
+            .row(("✅ Опубликовать", f"schedule:confirm:{schedule_id}"))
+            .row(("❌ Пропустить", f"schedule:skip:{schedule_id}"))
+            .build()
+        )
+
+    @classmethod
+    def schedule_edit_options(cls, schedule_id: int) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("Сделать короче", f"schedule:edit:{schedule_id}:shorter"))
+            .row(("Сделать длиннее", f"schedule:edit:{schedule_id}:longer"))
+            .row(("Сделать экспертнее", f"schedule:edit:{schedule_id}:expert"))
+            .row(("Дружелюбнее", f"schedule:edit:{schedule_id}:friendly"))
+            .row(("Добавить фактов", f"schedule:edit:{schedule_id}:facts"))
+            .row(("Переделать полностью", f"schedule:edit:{schedule_id}:rewrite"))
+            .row(("💬 Своё описание", f"schedule:edit:{schedule_id}:custom"))
+            .row(("Назад", f"schedule:review:{schedule_id}"))
+            .build()
+        )
+
+    @classmethod
+    def plan_creation_prompt(cls, channel_id: int) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("Да, создать план", f"newplan:start:{channel_id}"))
+            .row(("Позже", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def plan_creation_method(cls, channel_id: int) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("🧠 AI сгенерирует", f"newplan:ai:{channel_id}"))
+            .row(("📋 Загрузить свой", f"newplan:custom:{channel_id}"))
+            .row(("🔍 AI с поиском в интернете", f"newplan:search:{channel_id}"))
+            .row(("Назад", "main_menu"))
             .build()
         )

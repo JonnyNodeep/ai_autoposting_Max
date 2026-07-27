@@ -61,12 +61,19 @@ class ContentPrompts:
     def generate_topics(
         title: str, topic: str, style_profile: dict, duration_days: int, topic_count: int,
         user_prefs: str | None = None,
+        search_results: str = "",
     ) -> tuple[str, str]:
-        system = (
-            "Ты — AI-контент-менеджер. Придумай темы для постов. "
-            "Отвечай ТОЛЬКО списком тем, каждая на новой строке, "
-            "без нумерации, без пояснений."
-        )
+        custom = style_profile.get("custom_prompt", "")
+        if custom:
+            system = custom
+            if user_prefs:
+                system += f"\n\nОБЯЗАТЕЛЬНО — каждая тема ДОЛЖНА строго: {user_prefs}"
+        else:
+            system = (
+                "Ты — AI-контент-менеджер. Придумай темы для постов. "
+                "Отвечай ТОЛЬКО списком тем, каждая на новой строке, "
+                "без нумерации, без пояснений."
+            )
         tone = style_profile.get("tone", "friendly")
         audience = style_profile.get("audience", "широкая аудитория")
         topics_list = ", ".join(style_profile.get("topics", [])) or topic
@@ -74,8 +81,10 @@ class ContentPrompts:
         prefs_line = ""
         if user_prefs:
             prefs_line = (
-                f"ВАЖНО — пожелания пользователя к темам: {user_prefs}\n"
-                f"Строго учти их при выборе тем.\n\n"
+                f"ОБЯЗАТЕЛЬНО — пожелания пользователя. Каждая тема ДОЛЖНА строго соответствовать:\n"
+                f"{user_prefs}\n\n"
+                f"НЕ игнорируй эти требования. Если пользователь просит факты — дай факты. "
+                f"Если просит рецепты — дай рецепты. Выполняй буквально.\n\n"
             )
 
         user = (
@@ -87,6 +96,13 @@ class ContentPrompts:
             f"Аудитория: {audience}\n"
             f"Период: {duration_days} дней\n\n"
             f"{prefs_line}"
+        )
+        if search_results:
+            user += (
+                f"РЕЗУЛЬТАТЫ ПОИСКА В ИНТЕРНЕТЕ:\n{search_results[:2000]}\n\n"
+                f"Используй эти факты для создания тем. НЕ выдумывай.\n\n"
+            )
+        user += (
             f"Требования к темам:\n"
             f"- Каждая тема — 1 строка, 5-15 слов\n"
             f"- Темы должны быть разными, не повторяться\n"
@@ -100,7 +116,37 @@ class ContentPrompts:
         title: str, topic_text: str, style_profile: dict, sample_posts: list[str],
         post_settings: dict | None = None, channel_link: str = "",
         search_results: str | None = None,
+        reference_post: str = "",
+        user_prefs: str = "",
     ) -> tuple[str, str]:
+        custom = style_profile.get("custom_prompt", "")
+        if custom:
+            system = custom
+            user = (
+                f"Напиши пост на тему: {topic_text}\n\n"
+                f"Ответ — ТОЛЬКО JSON:\n"
+                f'{{"title": "...", "text": "...", "cta": "...", "image_prompt": "..."}}'
+            )
+            return system, user
+
+        if reference_post:
+            system = (
+                "Ты — профессиональный автор контента. СКОПИРУЙ формат примера ТОЧЬ-В-ТОЧЬ. "
+                "Та же длина абзацев, те же эмодзи, та же структура, то же количество предложений. "
+                "НЕ меняй стиль, тональность, знаки препинания. "
+                "Замени только ТЕМУ на новую, сохранив всё остальное как в примере. "
+                "Отвечай ТОЛЬКО валидным JSON, без markdown-блоков."
+            )
+            user = (
+                f"СКОПИРУЙ формат этого поста 1:1.\n\n"
+                f"ПРИМЕР (скопируй формат, длину, эмодзи, структуру):\n{reference_post}\n\n"
+                f"НОВАЯ ТЕМА: {topic_text}\n\n"
+                f"Напиши пост на новую тему, сохранив формат примера точь-в-точь. "
+                f"Ответ — ТОЛЬКО JSON:\n"
+                f'{{"title": "...", "text": "...", "cta": "...", "image_prompt": "..."}}'
+            )
+            return system, user
+
         system = (
             "Ты — профессиональный автор контента. Пиши интересные, вовлекающие посты. "
             "Отвечай ТОЛЬКО валидным JSON, без markdown-блоков. "
@@ -127,21 +173,6 @@ class ContentPrompts:
                 "- Поле CTA (cta) ДОЛЖНО содержать призыв поделиться постом с другом, "
                 "НО НЕ дублируй этот же текст в поле text\n"
             )
-        if settings.get("same_style"):
-            extra_lines += (
-                "- СТРОГО соблюдай тот же стиль, тональность и структуру что в примерах постов\n"
-            )
-        if settings.get("match_format"):
-            extra_lines += (
-                "- ПРОАНАЛИЗИРУЙ формат постов в примерах. Определи тип контента: "
-                "это рецепт? обзор? инструкция? новость? лайфхак?\n"
-                "- Напиши пост СТРОГО того же типа контента что в примерах. "
-                "Если примеры — рецепты, пиши рецепт с ингредиентами и пошаговой инструкцией. "
-                "Если примеры — обзоры, пиши обзор. НЕ МЕНЯЙ тип контента.\n"
-                "- Сохрани структуру из примеров: те же разделы, такое же форматирование, "
-                "такой же способ подачи информации.\n"
-            )
-
         if style_profile.get("visual_style"):
             extra_lines += (
                 f"- Промпт изображения (image_prompt) ОБЯЗАТЕЛЬНО должен соответствовать "
@@ -153,6 +184,11 @@ class ContentPrompts:
                 "- НЕ упоминай «пишите в комментариях», «обсудим в комментариях», "
                 "«делитесь мнением» и подобные призывы к обсуждению — "
                 "комментарии в канале отключены. Реакции и лайки упоминать МОЖНО.\n"
+            )
+
+        if user_prefs:
+            extra_lines += (
+                f"- ОБЯЗАТЕЛЬНО — требования к посту. Выполни буквально: {user_prefs}\n"
             )
 
         search_block = ""
@@ -203,8 +239,12 @@ class ContentPrompts:
     @staticmethod
     def edit_post(
         title: str, text: str, cta: str, edit_type: str, style_profile: dict | None = None,
+        custom_instruction: str | None = None,
     ) -> tuple[str, str]:
-        instruction = ContentPrompts.EDIT_INSTRUCTIONS.get(edit_type, "Перепиши пост заново.")
+        if custom_instruction:
+            instruction = custom_instruction
+        else:
+            instruction = ContentPrompts.EDIT_INSTRUCTIONS.get(edit_type, "Перепиши пост заново.")
         tone = style_profile.get("tone", "friendly") if style_profile else "friendly"
         audience = style_profile.get("audience", "широкая аудитория") if style_profile else "широкая аудитория"
 

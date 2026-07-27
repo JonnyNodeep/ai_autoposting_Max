@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from secrets import compare_digest
 
 from fastapi import Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +13,9 @@ from app.infrastructure.repositories.subscription_repository import SQLAlchemySu
 
 def require_api_token(x_api_token: str = Header(default="")) -> None:
     expected_token = settings.app.api_token or settings.admin.api_token
-    if expected_token and x_api_token != expected_token:
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="API token is not configured")
+    if not compare_digest(x_api_token, expected_token):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 

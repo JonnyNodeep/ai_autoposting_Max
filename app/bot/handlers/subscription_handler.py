@@ -27,7 +27,7 @@ TIER_PRICES = {
 
 
 def register_subscription_handlers(dispatcher: UpdateDispatcher) -> None:
-    @dispatcher.register(UpdateType.MESSAGE_CALLBACK)
+    @dispatcher.register(UpdateType.MESSAGE_CALLBACK, prefixes=["subscription:"])
     async def on_subscription_callback(update: dict) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))

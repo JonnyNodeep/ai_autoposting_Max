@@ -112,7 +112,7 @@ class SchedulerService:
                                 continue
 
                             try:
-                                gen_uc = GeneratePostUseCase(ch_repo, post_repo, topic_repo, openai_client)
+                                gen_uc = GeneratePostUseCase(plan_repo, ch_repo, post_repo, topic_repo, openai_client)
                                 post = await gen_uc.execute(schedule.topic_id)
                                 await session.commit()
 
@@ -158,7 +158,7 @@ class SchedulerService:
                         if not user:
                             continue
 
-                        text_body = post.text[:600] + ('...' if len(post.text) > 600 else '')
+                        text_body = post.text[:2000] + ('...' if len(post.text) > 2000 else '')
                         cta_line = f"_{post.cta}_" if post.cta and post.cta not in post.text else ""
                         text = (
                             f"*Готово к публикации в канале {channel.title}*\n\n"
@@ -170,14 +170,12 @@ class SchedulerService:
 
                         attachments = []
                         if post.image_url:
-                            attachments.append({"type": "image", "payload": {"url": post.image_url}})
+                            payload = {"token": post.image_url} if "/app/uploads/" not in (post.image_url or "") else {"url": post.image_url}
+                            attachments.append({"type": "image", "payload": payload})
 
                         from app.bot.keyboards.builder import InlineKeyboardBuilder
                         attachments.append(
-                            InlineKeyboardBuilder()
-                            .row(("Опубликовать", f"schedule:confirm:{schedule.id}"))
-                            .row(("Пропустить", f"schedule:skip:{schedule.id}"))
-                            .build()
+                            InlineKeyboardBuilder.schedule_review(schedule.id)
                         )
 
                         await max_client.send_message_to_user(
@@ -244,11 +242,7 @@ class SchedulerService:
                         await max_client.send_message_to_user(
                             user_id=owner.max_user_id,
                             text=f"Напоминание: пост *{post.title[:50]}* всё ещё ждёт подтверждения.",
-                            attachments=[
-                                InlineKeyboardBuilder()
-                                .row(("✅ Опубликовать", f"schedule:confirm:{schedule.id}"))
-                                .build()
-                            ],
+                            attachments=[InlineKeyboardBuilder.schedule_review(schedule.id)],
                             fmt="markdown",
                         )
                 finally:

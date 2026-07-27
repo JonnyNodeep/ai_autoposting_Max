@@ -20,6 +20,17 @@ class CreateChannelUseCase:
     async def execute(self, owner_id: int, max_chat_id: int) -> Channel:
         existing = await self._channel_repo.get_by_max_chat_id(max_chat_id)
         if existing:
+            if not existing.is_active:
+                existing.is_active = True
+                chat_info = await self._max_client.get_chat(max_chat_id)
+                existing.title = chat_info.get("title", existing.title)
+                existing.channel_link = chat_info.get("link", existing.channel_link)
+                existing.is_setup_complete = False
+                existing.content_frequency = None
+                existing.sample_posts = []
+                await self._channel_repo.update(existing)
+                logger.info(f"Channel reactivated: max_chat_id={max_chat_id} title={existing.title}")
+                return existing
             raise ValueError(f"Channel max_chat_id={max_chat_id} already registered")
 
         subscription = await self._subscription_repo.get_active_by_user(owner_id)

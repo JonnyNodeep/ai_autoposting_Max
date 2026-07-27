@@ -32,7 +32,6 @@ def mock_post():
     )
 
 
-@pytest.mark.skip(reason="Requires DI refactor: use case creates session internally")
 @pytest.mark.asyncio
 async def test_generate_post(mock_channel, mock_topic):
     mock_openai = AsyncMock()
@@ -41,7 +40,11 @@ async def test_generate_post(mock_channel, mock_topic):
         '"cta": "Follow us!", "image_prompt": "AI image"}'
     )
 
+    mock_plan_repo = AsyncMock()
+    mock_plan_repo.get_by_id.return_value = ContentPlan(id=1, channel_id=1, duration_days=7)
+
     mock_channel_repo = AsyncMock()
+    mock_channel_repo.get_by_id.return_value = mock_channel
 
     mock_post_repo = AsyncMock()
     mock_post_repo.create.return_value = ContentPost(
@@ -53,42 +56,11 @@ async def test_generate_post(mock_channel, mock_topic):
     mock_topic_repo = AsyncMock()
     mock_topic_repo.get_by_id.return_value = mock_topic
 
-    uc = GeneratePostUseCase(mock_channel_repo, mock_post_repo, mock_topic_repo, mock_openai)
-
-    import app.application.content.generate_content as gen_mod
-    orig_factory = getattr(gen_mod, "async_session_factory", None)
-    orig_plan_repo_ctx = getattr(gen_mod, "SQLAContentPlanRepository", None)
-    orig_ch_repo_ctx = getattr(gen_mod, "SQLAlchemyChannelRepository", None)
-
-    try:
-        plan_mock = AsyncMock()
-        plan_mock.get_by_id.return_value = ContentPlan(id=1, channel_id=1, duration_days=7)
-
-        ch_mock = AsyncMock()
-        ch_mock.get_by_id.return_value = mock_channel
-
-        gen_mod.SQLAContentPlanRepository = lambda s: plan_mock
-        gen_mod.SQLAlchemyChannelRepository = lambda s: ch_mock
-
-        class FakeSessionCtx:
-            async def __aenter__(self):
-                return None
-            async def __aexit__(self, *a):
-                pass
-
-        gen_mod.async_session_factory = FakeSessionCtx
-
-        post = await uc.execute(1)
-        assert post.title == "AI Trends"
-        assert post.status == PostStatus.READY
-        assert mock_post_repo.create.called
-    finally:
-        if orig_factory is not None:
-            gen_mod.async_session_factory = orig_factory
-        if orig_plan_repo_ctx is not None:
-            gen_mod.SQLAContentPlanRepository = orig_plan_repo_ctx
-        if orig_ch_repo_ctx is not None:
-            gen_mod.SQLAlchemyChannelRepository = orig_ch_repo_ctx
+    uc = GeneratePostUseCase(mock_plan_repo, mock_channel_repo, mock_post_repo, mock_topic_repo, mock_openai)
+    post = await uc.execute(1)
+    assert post.title == "AI Trends"
+    assert post.status == PostStatus.READY
+    assert mock_post_repo.create.called
 
 
 @pytest.mark.asyncio

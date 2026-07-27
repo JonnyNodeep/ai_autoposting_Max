@@ -1,5 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends
 
 from app.infrastructure.database.session import get_session
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
@@ -7,12 +6,13 @@ from app.infrastructure.repositories.subscription_repository import SQLAlchemySu
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 from app.infrastructure.services.openai_client import OpenAIService
 from app.application.channels.create_channel import CreateChannelUseCase
-from app.application.channels.channel_setup import LoadSamplePostsUseCase, UpdateChannelSetupUseCase
+from app.application.channels.channel_setup import LoadSamplePostsUseCase
 from app.application.content.content_generation import (
     AnalyzeStyleUseCase,
     GenerateDescriptionUseCase,
     GenerateLogoUseCase,
 )
+from app.presentation.api.authz import ensure_channel_owner
 from app.presentation.api.dependencies import require_api_token
 from app.presentation.schemas.channel import (
     ChannelResponse,
@@ -40,12 +40,10 @@ async def list_channels(owner_id: int) -> list[ChannelResponse]:
 
 
 @channels_router.get("/{channel_id}", response_model=ChannelResponse)
-async def get_channel(channel_id: int) -> ChannelResponse:
+async def get_channel(channel_id: int, owner_id: int) -> ChannelResponse:
     async for session in get_session():
         repo = SQLAlchemyChannelRepository(session)
-        ch = await repo.get_by_id(channel_id)
-        if not ch:
-            raise HTTPException(status_code=404, detail="Channel not found")
+        ch = await ensure_channel_owner(session, channel_id, owner_id)
         return _channel_to_response(ch)
 
 
@@ -68,12 +66,10 @@ async def create_channel(body: ChannelCreateRequest, owner_id: int) -> ChannelRe
 
 
 @channels_router.patch("/{channel_id}", response_model=ChannelResponse)
-async def update_channel(channel_id: int, body: ChannelUpdateRequest) -> ChannelResponse:
+async def update_channel(channel_id: int, body: ChannelUpdateRequest, owner_id: int) -> ChannelResponse:
     async for session in get_session():
         repo = SQLAlchemyChannelRepository(session)
-        ch = await repo.get_by_id(channel_id)
-        if not ch:
-            raise HTTPException(status_code=404, detail="Channel not found")
+        ch = await ensure_channel_owner(session, channel_id, owner_id)
 
         if body.topic is not None:
             ch.topic = body.topic
@@ -90,18 +86,20 @@ async def update_channel(channel_id: int, body: ChannelUpdateRequest) -> Channel
 
 
 @channels_router.delete("/{channel_id}")
-async def delete_channel(channel_id: int) -> dict:
+async def delete_channel(channel_id: int, owner_id: int) -> dict:
     async for session in get_session():
         repo = SQLAlchemyChannelRepository(session)
+        await ensure_channel_owner(session, channel_id, owner_id)
         await repo.delete(channel_id)
         await session.commit()
         return {"status": "deleted"}
 
 
 @channels_router.post("/{channel_id}/sample-posts", response_model=SamplePostsResponse)
-async def load_sample_posts(channel_id: int) -> SamplePostsResponse:
+async def load_sample_posts(channel_id: int, owner_id: int) -> SamplePostsResponse:
     async for session in get_session():
         channel_repo = SQLAlchemyChannelRepository(session)
+        await ensure_channel_owner(session, channel_id, owner_id)
         max_client = MaxAPIHTTPClient()
 
         uc = LoadSamplePostsUseCase(channel_repo, max_client)
@@ -112,9 +110,10 @@ async def load_sample_posts(channel_id: int) -> SamplePostsResponse:
 
 
 @channels_router.post("/{channel_id}/analyze-style", response_model=StyleProfileResponse)
-async def analyze_style(channel_id: int) -> StyleProfileResponse:
+async def analyze_style(channel_id: int, owner_id: int) -> StyleProfileResponse:
     async for session in get_session():
         channel_repo = SQLAlchemyChannelRepository(session)
+        await ensure_channel_owner(session, channel_id, owner_id)
         openai_client = OpenAIService()
 
         uc = AnalyzeStyleUseCase(channel_repo, openai_client)
@@ -132,9 +131,10 @@ async def analyze_style(channel_id: int) -> StyleProfileResponse:
 
 
 @channels_router.post("/{channel_id}/generate-description", response_model=DescriptionResponse)
-async def generate_description(channel_id: int) -> DescriptionResponse:
+async def generate_description(channel_id: int, owner_id: int) -> DescriptionResponse:
     async for session in get_session():
         channel_repo = SQLAlchemyChannelRepository(session)
+        await ensure_channel_owner(session, channel_id, owner_id)
         openai_client = OpenAIService()
 
         uc = GenerateDescriptionUseCase(channel_repo, openai_client)
@@ -144,9 +144,10 @@ async def generate_description(channel_id: int) -> DescriptionResponse:
 
 
 @channels_router.post("/{channel_id}/generate-logo", response_model=LogoResponse)
-async def generate_logo(channel_id: int) -> LogoResponse:
+async def generate_logo(channel_id: int, owner_id: int) -> LogoResponse:
     async for session in get_session():
         channel_repo = SQLAlchemyChannelRepository(session)
+        await ensure_channel_owner(session, channel_id, owner_id)
         openai_client = OpenAIService()
 
         uc = GenerateLogoUseCase(channel_repo, openai_client)
