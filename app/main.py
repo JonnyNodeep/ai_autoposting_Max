@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.bot.dispatcher import UpdateDispatcher
@@ -57,14 +56,6 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="SaaS-платформа автоматизации контента для каналов MAX",
         lifespan=lifespan,
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["*"],
     )
 
     app.include_router(api_router)

@@ -1,9 +1,9 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+
 from app.infrastructure.database.session import get_session
 from app.infrastructure.redis.client import get_redis
-from app.infrastructure.services.max_client import MaxAPIHTTPClient
 
 health_router = APIRouter(tags=["Health"])
 
@@ -29,16 +29,6 @@ async def health_check():
     except Exception:
         healthy = False
         details["redis"] = "unavailable"
-
-    max_client = MaxAPIHTTPClient()
-    try:
-        await max_client.get_me()
-        details["max_api"] = "ok"
-    except Exception:
-        healthy = False
-        details["max_api"] = "unavailable"
-    finally:
-        await max_client.close()
 
     status_code = 200 if healthy else 503
     return JSONResponse(

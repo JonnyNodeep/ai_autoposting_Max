@@ -254,26 +254,6 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
-    def channel_list(cls, channels: list, include_back: bool = True) -> dict[str, Any]:
-        builder = cls()
-        for ch in channels:
-            label = f"{ch.title}"
-            if not getattr(ch, "is_setup_complete", True):
-                label += " ⚙️"
-            builder.row((label, f"channels:select:{ch.id}"))
-        if include_back:
-            builder.row(("На главную", "main_menu"))
-        return builder.build()
-
-    @classmethod
-    def ai_studio_channel_select(cls, channels: list) -> dict[str, Any]:
-        builder = cls()
-        for ch in channels:
-            builder.row((ch.title, f"ai:channel:{ch.id}"))
-        builder.row(("На главную", "main_menu"))
-        return builder.build()
-
-    @classmethod
     def ai_studio_blocks(cls, blocks: dict, pipeline_active: bool = False) -> dict[str, Any]:
         builder = cls()
 

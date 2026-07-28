@@ -4,9 +4,9 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir poetry==1.8.3
 
-COPY pyproject.toml ./
+COPY pyproject.toml poetry.lock ./
 RUN poetry config virtualenvs.create false \
-    && poetry install --no-interaction --no-ansi --no-root
+    && poetry install --no-interaction --no-ansi --no-root --with dev
 
 FROM python:3.12-slim
 
@@ -27,6 +27,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY app/ /app/app/
 COPY alembic.ini /app/
 COPY alembic/ /app/alembic/
+COPY tests/ /app/tests/
+COPY pyproject.toml /app/
 
 EXPOSE 8000
 

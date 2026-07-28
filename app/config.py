@@ -74,6 +74,7 @@ class VidGoSettings(BaseSettings):
 
     api_key: str = Field(default="", alias="VIDGO_API_KEY")
     callback_url: str = Field(default="", alias="VIDGO_CALLBACK_URL")
+    webhook_token: str = Field(default="", alias="VIDGO_WEBHOOK_TOKEN")
 
 
 class Settings(BaseSettings):

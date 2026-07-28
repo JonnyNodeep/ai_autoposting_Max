@@ -1,13 +1,14 @@
 import time
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy import text
 
 from app.infrastructure.database.session import engine
 from app.infrastructure.redis.client import redis_client
-from sqlalchemy import text
+from app.presentation.api.dependencies import require_api_token
 
-metrics_router = APIRouter(tags=["Metrics"])
+metrics_router = APIRouter(tags=["Metrics"], dependencies=[Depends(require_api_token)])
 
 START_TIME = time.time()
 

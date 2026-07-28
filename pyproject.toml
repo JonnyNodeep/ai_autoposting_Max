@@ -29,8 +29,14 @@ pillow = "^10.4"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
 pytest-asyncio = "^0.24"
+pytest-cov = "^5.0"
 httpx-sse = "^0.4"
 aiosqlite = "^0.20"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q"
 
 [build-system]
 requires = ["poetry-core"]

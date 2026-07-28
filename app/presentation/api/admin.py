@@ -1,28 +1,25 @@
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends
 
 from app.infrastructure.database.session import get_session
 from app.infrastructure.repositories.usage_stats_repository import UsageStatsRepository
-from app.config import settings
+from app.presentation.api.dependencies import require_api_token
 
-admin_router = APIRouter(prefix="/api/admin", tags=["Admin"])
-
-
-def _check_admin(api_token: str = Header(None)) -> None:
-    if not settings.admin.api_token or api_token != settings.admin.api_token:
-        raise HTTPException(status_code=403, detail="Forbidden")
+admin_router = APIRouter(
+    prefix="/api/admin",
+    tags=["Admin"],
+    dependencies=[Depends(require_api_token)],
+)
 
 
 @admin_router.get("/stats")
-async def get_stats(api_token: str = Header(None)) -> dict:
-    _check_admin(api_token)
+async def get_stats() -> dict:
     async for session in get_session():
         repo = UsageStatsRepository(session)
         return await repo.get_stats()
 
 
 @admin_router.get("/users")
-async def get_users(api_token: str = Header(None), limit: int = 50) -> list[dict]:
-    _check_admin(api_token)
+async def get_users(limit: int = 50) -> list[dict]:
     async for session in get_session():
         repo = UsageStatsRepository(session)
         users = await repo.get_all_users(limit)
@@ -41,8 +38,7 @@ async def get_users(api_token: str = Header(None), limit: int = 50) -> list[dict
 
 
 @admin_router.get("/subscriptions")
-async def get_subscriptions(api_token: str = Header(None), limit: int = 50) -> list[dict]:
-    _check_admin(api_token)
+async def get_subscriptions(limit: int = 50) -> list[dict]:
     async for session in get_session():
         repo = UsageStatsRepository(session)
         subs = await repo.get_all_subscriptions(limit)
@@ -60,8 +56,7 @@ async def get_subscriptions(api_token: str = Header(None), limit: int = 50) -> l
 
 
 @admin_router.get("/costs")
-async def get_costs(days: int = 30, api_token: str = Header(None)) -> dict:
-    _check_admin(api_token)
+async def get_costs(days: int = 30) -> dict:
     async for session in get_session():
         repo = UsageStatsRepository(session)
         return await repo.get_openai_costs(days)

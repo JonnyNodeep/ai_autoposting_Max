@@ -10,7 +10,7 @@ from app.domain.interfaces.openai_client import OpenAIClient
 from loguru import logger
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
-WATERMARK_SCALE = 3
+WATERMARK_SCALE = 3 / 5
 
 
 class OpenAIService(OpenAIClient):
