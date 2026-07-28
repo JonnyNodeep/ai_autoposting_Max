@@ -3,6 +3,7 @@ import pytest_asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.infrastructure.models  # noqa: F401 — register models on Base.metadata
 from app.infrastructure.database.base import Base
 from app.infrastructure.repositories.user_repository import SQLAlchemyUserRepository
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
