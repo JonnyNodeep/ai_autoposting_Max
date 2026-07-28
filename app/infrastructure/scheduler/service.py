@@ -354,6 +354,7 @@ class SchedulerService:
             logger.exception(f"Failed to load active pipelines: {e}")
 
     async def run_pipeline_step(self, run_id: int) -> None:
+        max_client: MaxAPIHTTPClient | None = None
         try:
             async with async_session_factory() as session:
                 from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
@@ -400,20 +401,16 @@ class SchedulerService:
                             duration=video_block.get("duration", 6),
                             mode=video_block.get("mode", "normal"),
                             resolution=video_block.get("resolution", "720p"),
+                            task_meta={
+                                "kind": "pipeline",
+                                "run_id": run_id,
+                                "channel_id": run.channel_id,
+                                "channel_link": run.channel_link,
+                            },
                         )
 
-                        import asyncio as asyncio_mod
-                        deadline = datetime.now(UTC).timestamp() + 900
-                        while True:
-                            task = await vidgo.get_task_status(task_id)
-                            if task["status"] == "finished":
-                                video_url = task["files"][0]["file_url"]
-                                break
-                            if task["status"] == "failed":
-                                raise RuntimeError(task.get("error_message", "failed"))
-                            if datetime.now(UTC).timestamp() > deadline:
-                                raise TimeoutError("timeout")
-                            await asyncio_mod.sleep(5)
+                        result = await vidgo.wait_for_task(task_id, timeout=900)
+                        video_url = result["files"][0]["file_url"]
 
                         import tempfile, httpx
                         from pathlib import Path as P
@@ -468,10 +465,12 @@ class SchedulerService:
                     run.next_run_at = PipelineManager._calc_next_run(run.times, now)
                 await repo.update(run)
 
-                await max_client.close()
                 logger.info(f"Pipeline {run_id} step completed")
         except Exception as e:
             logger.exception(f"Pipeline {run_id} step failed: {e}")
+        finally:
+            if max_client is not None:
+                await max_client.close()
 
 
 scheduler_service = SchedulerService()
