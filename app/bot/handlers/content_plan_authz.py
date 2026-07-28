@@ -73,7 +73,7 @@ async def is_authorized_content_callback(
         if payload.startswith("post:publish:"):
             return await owns_post(int(payload.split(":")[2]))
         if payload.startswith("edit:"):
-            return await owns_post(int(payload.split(":")[2]))
+            return await owns_post(int(payload.split(":")[1]))
         return True
     except (IndexError, ValueError):
         return False
