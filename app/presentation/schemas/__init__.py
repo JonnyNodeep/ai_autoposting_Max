@@ -7,12 +7,6 @@ from app.presentation.schemas.channel import (
     StyleProfileResponse,
     DescriptionResponse,
     LogoResponse,
-    PlanResponse,
-    PlanCreateRequest,
-    TopicResponse,
-    TopicUpdateRequest,
-    PostResponse,
-    PublishRequest,
 )
 from app.presentation.schemas.subscription import SubscriptionResponse
 
@@ -26,11 +20,5 @@ __all__ = [
     "StyleProfileResponse",
     "DescriptionResponse",
     "LogoResponse",
-    "PlanResponse",
-    "PlanCreateRequest",
-    "TopicResponse",
-    "TopicUpdateRequest",
-    "PostResponse",
-    "PublishRequest",
     "SubscriptionResponse",
 ]

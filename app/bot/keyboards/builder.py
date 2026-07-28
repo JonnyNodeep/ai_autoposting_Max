@@ -133,107 +133,6 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
-    def plan_prefs_skip(cls, channel_id: int, duration_days: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("Пропустить", f"plan:prefs:skip:{channel_id}:{duration_days}"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_settings(cls, prefs: dict) -> dict[str, Any]:
-        subscribe_label = "Подписка: ВКЛ" if prefs.get("subscribe_cta") else "Подписка: ВЫКЛ"
-        share_label = "Поделиться: ВКЛ" if prefs.get("share_cta") else "Поделиться: ВЫКЛ"
-        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", False) else "💬 Комментарии: ВЫКЛ"
-        search_label = "🔍 Поиск в интернете: ВКЛ" if prefs.get("search_enabled") else "🔍 Поиск в интернете: ВЫКЛ"
-        sources_label = "📎 Источники: ВКЛ" if prefs.get("show_sources") else "📎 Источники: ВЫКЛ"
-        review_label = "👁️ Ревью перед публикацией: ВКЛ" if prefs.get("review_enabled") else "👁️ Ревью перед публикацией: ВЫКЛ"
-        return (
-            cls()
-            .row((subscribe_label, "plan:settings:toggle:subscribe_cta"))
-            .row((share_label, "plan:settings:toggle:share_cta"))
-            .row((comments_label, "plan:settings:toggle:comments_enabled"))
-            .row((search_label, "plan:settings:toggle:search_enabled"))
-            .row((sources_label, "plan:settings:toggle:show_sources"))
-            .row((review_label, "plan:settings:toggle:review_enabled"))
-            .row(("👁️ Визуальный стиль", "settings:visual"))
-            .row(("Генерировать план ▶️", "plan:settings:generate"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_time_picker(cls, plan_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(
-                ("12:00 МСК", f"plan:time:{plan_id}:12"),
-                ("15:00 МСК", f"plan:time:{plan_id}:15"),
-            )
-            .row(
-                ("18:00 МСК", f"plan:time:{plan_id}:18"),
-                ("21:00 МСК", f"plan:time:{plan_id}:21"),
-            )
-            .row(("🕐 Своё время", f"plan:time:custom:{plan_id}"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_actions(cls, plan_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("⚙️ Настройки плана", f"plan:settings_view:{plan_id}"))
-            .row(("🕐 Изменить время", f"plan:edittime:{plan_id}"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_settings_edit(cls, plan_id: int, prefs: dict, freq_name: str = "") -> dict[str, Any]:
-        subscribe_label = "Подписка: ВКЛ" if prefs.get("subscribe_cta") else "Подписка: ВЫКЛ"
-        share_label = "Поделиться: ВКЛ" if prefs.get("share_cta") else "Поделиться: ВЫКЛ"
-        comments_label = "💬 Комментарии: ВКЛ" if prefs.get("comments_enabled", False) else "💬 Комментарии: ВЫКЛ"
-        search_label = "🔍 Поиск в интернете: ВКЛ" if prefs.get("search_enabled") else "🔍 Поиск в интернете: ВЫКЛ"
-        sources_label = "📎 Источники: ВКЛ" if prefs.get("show_sources") else "📎 Источники: ВЫКЛ"
-        review_label = "👁️ Ревью перед публикацией: ВКЛ" if prefs.get("review_enabled") else "👁️ Ревью перед публикацией: ВЫКЛ"
-        freq_label = f"⏱ Частота: {freq_name}" if freq_name else "⏱ Частота"
-        return (
-            cls()
-            .row((subscribe_label, f"plan:settings:etoggle:{plan_id}:subscribe_cta"))
-            .row((share_label, f"plan:settings:etoggle:{plan_id}:share_cta"))
-            .row((comments_label, f"plan:settings:etoggle:{plan_id}:comments_enabled"))
-            .row((search_label, f"plan:settings:etoggle:{plan_id}:search_enabled"))
-            .row((sources_label, f"plan:settings:etoggle:{plan_id}:show_sources"))
-            .row((review_label, f"plan:settings:etoggle:{plan_id}:review_enabled"))
-            .row((freq_label, f"plan:freq:{plan_id}"))
-            .row(("🕐 Изменить время", f"plan:edittime:{plan_id}"))
-            .row(("👁️ Визуальный стиль", f"plan:visual:{plan_id}"))
-            .row(("✏️ Ред. контент план", f"plan:edit:{plan_id}"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_edit(cls, plan_id: int, topics: list) -> dict[str, Any]:
-        builder = cls()
-        for i, t in enumerate(topics):
-            builder.row(
-                (f"✅ {t.topic[:35]}", f"topic:approve:{t.id}:edit:{plan_id}"),
-                (f"❌", f"topic:delete:{t.id}:edit:{plan_id}"),
-            )
-        builder.row(("+ Добавить тему", f"topic:add:{plan_id}"))
-        builder.row(("💬 Уточнить пожелания", f"plan:reprefs:{plan_id}:edit"))
-        builder.row(("🔄 Перегенерировать план", f"plan:regenerate:{plan_id}"))
-        builder.row(("🚀 Утвердить план", f"plan:approve:{plan_id}"))
-        builder.row(("🕐 Изменить время", f"plan:edittime:{plan_id}"))
-        builder.row(("👁️ Визуальный стиль", f"plan:visual:{plan_id}"))
-        builder.row(("🗑 Удалить план", f"plan:delete:{plan_id}"))
-        builder.row(("На главную", "main_menu"))
-        return builder.build()
-
-    @classmethod
     def channel_actions(cls, channel_id: int) -> dict[str, Any]:
         return (
             cls()
@@ -291,7 +190,9 @@ class InlineKeyboardBuilder:
         prompt_mode = blocks.get("image_prompt", {}).get("mode", "ai")
         prompt_label = "📝 Промпт для изображений"
         if prompt_enabled:
-            if prompt_preview:
+            if prompt_mode == "from_post":
+                prompt_label += " — по тексту поста"
+            elif prompt_preview:
                 preview = prompt_preview[:40] + "…" if len(prompt_preview) > 40 else prompt_preview
                 prompt_label += f" — {preview}"
             else:
@@ -313,7 +214,7 @@ class InlineKeyboardBuilder:
         post_mode = blocks.get("post_gen", {}).get("mode", "")
         post_label = "📋 Генерация поста"
         if post_enabled:
-            mode_display = "AI" if post_mode == "ai" else "Фикс. текст"
+            mode_display = "AI каждый запуск" if post_mode == "ai" else "Фикс. текст"
             post_label += f" — {mode_display}"
         else:
             post_label += " (выкл)"
@@ -379,14 +280,18 @@ class InlineKeyboardBuilder:
 
     @classmethod
     def ai_prompt_mode_select(cls, block_id: str) -> dict[str, Any]:
-        return (
+        builder = (
             cls()
             .row(("🤖 AI сгенерирует", f"ai:block:{block_id}:mode:ai"))
             .row(("📄 Готовый промпт", f"ai:block:{block_id}:mode:fixed"))
-            .row(("Назад к блокам", "ai:back_to_blocks"))
-            .row(("На главную", "main_menu"))
-            .build()
         )
+        if block_id == "image_prompt":
+            builder.row(
+                ("🖼 Картинка по тексту поста", f"ai:block:{block_id}:mode:from_post")
+            )
+        builder.row(("Назад к блокам", "ai:back_to_blocks"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
 
     @classmethod
     def ai_post_gen_mode_select(cls) -> dict[str, Any]:
@@ -394,6 +299,17 @@ class InlineKeyboardBuilder:
             cls()
             .row(("🤖 AI сгенерирует", "ai:block:post_gen:mode:ai"))
             .row(("📄 Готовый текст", "ai:block:post_gen:mode:fixed"))
+            .row(("Назад к блокам", "ai:back_to_blocks"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def ai_image_prompt_visual_style_toggle(cls) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✅ Да", "ai:block:image_prompt:visual:yes"))
+            .row(("❌ Нет", "ai:block:image_prompt:visual:no"))
             .row(("Назад к блокам", "ai:back_to_blocks"))
             .row(("На главную", "main_menu"))
             .build()
@@ -411,6 +327,39 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
+    def ai_post_gen_bold_toggle(cls) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✅ Да", "ai:block:post_gen:bold:yes"))
+            .row(("❌ Нет", "ai:block:post_gen:bold:no"))
+            .row(("Назад к блокам", "ai:back_to_blocks"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def ai_post_gen_emoji_toggle(cls) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✅ Да", "ai:block:post_gen:emoji:yes"))
+            .row(("❌ Нет", "ai:block:post_gen:emoji:no"))
+            .row(("Назад к блокам", "ai:back_to_blocks"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def ai_post_gen_comments_toggle(cls) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✅ Да, подключены", "ai:block:post_gen:comments:yes"))
+            .row(("❌ Нет", "ai:block:post_gen:comments:no"))
+            .row(("Назад к блокам", "ai:back_to_blocks"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
     def ai_post_gen_review(cls, mode: str) -> dict[str, Any]:
         builder = cls()
         if mode == "ai":
@@ -422,49 +371,6 @@ class InlineKeyboardBuilder:
             builder.row(("✏️ Изменить текст", "ai:post_gen:edit_input"))
         builder.row(("↩ Назад к блокам", "ai:post_gen:cancel"))
         return builder.build()
-
-    @classmethod
-    def post_review(cls, post_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("Сделать короче", f"edit:shorter:{post_id}"))
-            .row(("Сделать длиннее", f"edit:longer:{post_id}"))
-            .row(("Сделать экспертнее", f"edit:expert:{post_id}"))
-            .row(("Дружелюбнее", f"edit:friendly:{post_id}"))
-            .row(("Добавить фактов", f"edit:facts:{post_id}"))
-            .row(("Переделать полностью", f"edit:rewrite:{post_id}"))
-            .row(("📅 В расписание", f"schedule:show:{post_id}"))
-            .row(("🖼 Картинка", f"post:image:{post_id}"))
-            .row(("✅ Опубликовать", f"post:publish:{post_id}"))
-            .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def schedule_review(cls, schedule_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("✏️ Редактировать", f"schedule:edit:{schedule_id}"))
-            .row(("🖼 Картинка", f"schedule:image:{schedule_id}"))
-            .row(("✅ Опубликовать", f"schedule:confirm:{schedule_id}"))
-            .row(("❌ Пропустить", f"schedule:skip:{schedule_id}"))
-            .build()
-        )
-
-    @classmethod
-    def schedule_edit_options(cls, schedule_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("Сделать короче", f"schedule:edit:{schedule_id}:shorter"))
-            .row(("Сделать длиннее", f"schedule:edit:{schedule_id}:longer"))
-            .row(("Сделать экспертнее", f"schedule:edit:{schedule_id}:expert"))
-            .row(("Дружелюбнее", f"schedule:edit:{schedule_id}:friendly"))
-            .row(("Добавить фактов", f"schedule:edit:{schedule_id}:facts"))
-            .row(("Переделать полностью", f"schedule:edit:{schedule_id}:rewrite"))
-            .row(("💬 Своё описание", f"schedule:edit:{schedule_id}:custom"))
-            .row(("Назад", f"schedule:review:{schedule_id}"))
-            .build()
-        )
 
     @classmethod
     def ai_schedule_freq_select(cls) -> dict[str, Any]:
@@ -496,25 +402,5 @@ class InlineKeyboardBuilder:
             .row(("🕐 Своё время", "ai:block:schedule:time:custom"))
             .row(("Назад к блокам", "ai:back_to_blocks"))
             .row(("На главную", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_creation_prompt(cls, channel_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("Да, создать план", f"newplan:start:{channel_id}"))
-            .row(("Позже", "main_menu"))
-            .build()
-        )
-
-    @classmethod
-    def plan_creation_method(cls, channel_id: int) -> dict[str, Any]:
-        return (
-            cls()
-            .row(("🧠 AI сгенерирует", f"newplan:ai:{channel_id}"))
-            .row(("📋 Загрузить свой", f"newplan:custom:{channel_id}"))
-            .row(("🔍 AI с поиском в интернете", f"newplan:search:{channel_id}"))
-            .row(("Назад", "main_menu"))
             .build()
         )

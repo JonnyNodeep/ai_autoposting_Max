@@ -4,8 +4,7 @@ from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM
 from app.infrastructure.services.openai_client import OpenAIService
 
-from app.bot.handlers.ai_studio_entry import _escape_md, _model_name, _session_expired, _show_blocks
-from app.bot.handlers.ai_studio_video import _run_video_test
+from app.bot.handlers.ai_studio_entry import _model_name, _session_expired, _show_blocks
 
 
 async def handle_pipeline_callback(
@@ -92,91 +91,77 @@ async def handle_pipeline_callback(
 
         channel = await channel_repo.get_by_id(state["channel_id"]) if state.get("channel_id") else None
         ch_title = channel.title if channel else ""
+        blocks = state.get("blocks", {})
 
-        prompt_block = state.get("blocks", {}).get("image_prompt", {})
+        prompt_block = blocks.get("image_prompt", {})
         generated_prompt = prompt_block.get("generated_prompt", "")
+        post_block = blocks.get("post_gen", {})
+        post_text = (post_block.get("generated_post") or "").strip()
+        post_brief = (post_block.get("user_input") or "").strip()
+        has_legacy_prompt = bool(generated_prompt)
+        has_from_post_fixed = bool(
+            prompt_block.get("enabled")
+            and prompt_block.get("mode") == "from_post"
+            and post_text
+            and post_block.get("mode") != "ai"
+        )
+        has_from_post_ai = bool(
+            prompt_block.get("enabled")
+            and prompt_block.get("mode") == "from_post"
+            and post_block.get("mode") == "ai"
+            and post_brief
+        )
+        has_from_post = has_from_post_fixed or has_from_post_ai
 
-        if not generated_prompt:
+        if not has_legacy_prompt and not has_from_post:
             await max_client.send_message_to_user(
                 user_id=max_user_id,
-                text="Сначала настрой промпт для изображения в блоке «📝 Промпт для изображений».",
-                attachments=[InlineKeyboardBuilder.ai_studio_blocks(state["blocks"])],
+                text=(
+                    "Сначала настрой «📝 Промпт для изображений» "
+                    "(готовый/AI промпт или режим «Картинка по тексту поста» "
+                    "вместе с текстом/брифом в «📋 Генерация поста»)."
+                ),
+                attachments=[InlineKeyboardBuilder.ai_studio_blocks(blocks)],
             )
             return True
 
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text="🧪 Запускаю тест — генерирую изображение...",
+            text="🧪 Запускаю тест — генерирую контент...",
         )
+
+        from app.application.pipeline.context import PipelineContext
+        from app.application.pipeline.runner import PipelineRunner
 
         openai_client = OpenAIService()
-        logger.info(f"AI Studio test: generating image, prompt_len={len(generated_prompt)}")
-        image_url = await openai_client.generate_image(
-            prompt=generated_prompt,
-            channel_link=None,
-        )
-        logger.info(f"AI Studio test: image generated, url_preview={image_url[:120] if image_url else 'empty'}")
 
-        attachments = [InlineKeyboardBuilder.ai_studio_blocks(state["blocks"])]
-        if image_url:
-            if image_url.startswith("http://") or image_url.startswith("https://"):
-                payload = {"url": image_url}
-                logger.info(f"AI Studio test: using external URL for image")
-            else:
-                logger.info(f"AI Studio test: uploading local file to MAX: {image_url}")
-                token = await max_client.upload_file(image_url, "image")
-                payload = {"token": token}
-                logger.info(f"AI Studio test: MAX upload done, token={token[:40]}")
-            attachments.insert(0, {"type": "image", "payload": payload})
-
-        logger.info(f"AI Studio test: sending result to user {max_user_id}")
-        await max_client.send_message_to_user(
-            user_id=max_user_id,
-            text=(
-                f"🧪 *Тест — {ch_title}*\n\n"
-                f"Модель: {_model_name(state['blocks'].get('image_gen', {}).get('model', ''))}\n"
-                f"Промпт:\n`{generated_prompt[:300]}`"
-            ),
-            attachments=attachments,
-            fmt="markdown",
-        )
-
-        video_block = state.get("blocks", {}).get("video_gen", {})
-        video_token = None
-        if video_block.get("enabled") and video_block.get("generated_prompt") and image_url:
-            video_token = await _run_video_test(
-                max_user_id=max_user_id,
-                max_client=max_client,
-                state=state,
-                image_url=image_url,
-                ch_title=ch_title,
-                channel_link=channel.channel_link if channel else "",
-            )
-
-        post_block = state.get("blocks", {}).get("post_gen", {})
-        if post_block.get("enabled") and post_block.get("generated_post"):
-            post_text = post_block["generated_post"]
-
-            if post_block.get("add_channel_link") and channel and channel.channel_link:
-                post_text += f"\n\n**👉 [Подпишись на {_escape_md(ch_title)}]({channel.channel_link})**"
-
-            combined_attachments = []
-            if video_token:
-                combined_attachments.append({"type": "video", "payload": {"token": video_token}})
-
+        async def _on_progress(text: str) -> None:
+            # ImageGen already sends its own start notify; skip duplicate first line
+            if "Генерирую изображение" in text:
+                return
             await max_client.send_message_to_user(
                 user_id=max_user_id,
-                text=post_text[:3800],
-                attachments=combined_attachments if combined_attachments else None,
+                text=text,
                 fmt="markdown",
             )
-        elif video_token:
-            await max_client.send_message_to_user(
-                user_id=max_user_id,
-                text="🎬",
-                attachments=[{"type": "video", "payload": {"token": video_token}}],
-                fmt="markdown",
-            )
+
+        ctx = PipelineContext(
+            channel=channel,
+            channel_link=(channel.channel_link if channel else "") or "",
+            run_id=None,
+            max_client=max_client,
+            openai_client=openai_client,
+            target="user",
+            target_user_id=max_user_id,
+            channel_title=ch_title,
+            on_progress=_on_progress,
+            meta={
+                "image_model_name": _model_name(blocks.get("image_gen", {}).get("model", "")),
+                "preview_keyboard": InlineKeyboardBuilder.ai_studio_blocks(blocks),
+            },
+        )
+        logger.info(f"AI Studio test: running PipelineRunner for user={max_user_id}")
+        await PipelineRunner().run(ctx, blocks)
         return True
 
     return False

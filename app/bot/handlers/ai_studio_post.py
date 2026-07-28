@@ -2,6 +2,9 @@ import json
 
 from loguru import logger
 
+from app.application.pipeline.generate_post import generate_post_text
+from app.application.pipeline.recent_topics import fetch_recent_post_topics
+from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep
 from app.infrastructure.database.session import async_session_factory
@@ -13,11 +16,40 @@ from app.infrastructure.services.openai_client import OpenAIService
 from app.bot.handlers.ai_studio_entry import (
     REDIS_TTL,
     REVIEW_TTL,
-    _generate_post,
     _post_review_text,
     _session_expired,
     _show_blocks,
 )
+
+
+async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
+    redis = await get_redis()
+    await claim_text_input(redis, max_user_id, "post_gen", mode, REDIS_TTL)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(("Назад к блокам", "ai:post_gen:cancel"))
+    builder.row(("На главную", "main_menu"))
+
+    if mode == "ai":
+        prompt_text = (
+            "📋 *Генерация поста — AI*\n\n"
+            "Опиши *бриф / правила* для постов канала.\n"
+            "Бот будет писать *новый пост при каждом запуске* пайплайна.\n\n"
+            "Например: «каждый пост — отдельный нетривиальный ПП-рецепт "
+            "с КБЖУ, ингредиентами и шагами приготовления»"
+        )
+    else:
+        prompt_text = (
+            "📋 *Генерация поста — готовый текст*\n\n"
+            "Отправь готовый текст поста одним сообщением:"
+        )
+
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=prompt_text,
+        attachments=[builder.build()],
+        fmt="markdown",
+    )
 
 
 async def handle_post_callback(callback_data: str, max_user_id: int, max_client, channel_repo) -> bool:
@@ -42,7 +74,8 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
             user_id=max_user_id,
             text=(
                 f"📋 *Генерация поста — выбор режима*\n\n"
-                f"Текущий: {'AI' if current_mode == 'ai' else 'Готовый текст'}"
+                f"Текущий: "
+                f"{'AI (каждый запуск)' if current_mode == 'ai' else 'Готовый текст'}"
             ),
             attachments=[InlineKeyboardBuilder.ai_post_gen_mode_select()],
             fmt="markdown",
@@ -85,31 +118,73 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         logger.info(f"AI Studio post_gen link: mode={mode}, block_keys={list(block.keys())}")
         await fsm.set_block_data(max_user_id, "post_gen", {"add_channel_link": link == "yes"})
 
-        redis = await get_redis()
-        await redis.setex(f"ai_post_gen_wait:{max_user_id}", REDIS_TTL, mode)
-
-        builder = InlineKeyboardBuilder()
-        builder.row(("Назад к блокам", "ai:post_gen:cancel"))
-        builder.row(("На главную", "main_menu"))
-
         if mode == "ai":
-            prompt_text = (
-                "📋 *Генерация поста — AI*\n\n"
-                "Опиши тему поста.\n\n"
-                "Например: «пост про здоровое питание с советами на неделю»"
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    "📋 *Генерация поста — AI*\n\n"
+                    "Жирный заголовок и подзаголовки?"
+                ),
+                attachments=[InlineKeyboardBuilder.ai_post_gen_bold_toggle()],
+                fmt="markdown",
             )
-        else:
-            prompt_text = (
-                "📋 *Генерация поста — готовый текст*\n\n"
-                "Отправь готовый текст поста одним сообщением:"
-            )
+            return True
 
+        await _ask_brief(max_user_id, max_client, mode)
+        return True
+
+    if callback_data.startswith("ai:block:post_gen:bold:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        await fsm.set_block_data(max_user_id, "post_gen", {"bold_headings": value == "yes"})
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text=prompt_text,
-            attachments=[builder.build()],
+            text=(
+                "📋 *Генерация поста — AI*\n\n"
+                "Нужны ли эмодзи?"
+            ),
+            attachments=[InlineKeyboardBuilder.ai_post_gen_emoji_toggle()],
             fmt="markdown",
         )
+        return True
+
+    if callback_data.startswith("ai:block:post_gen:emoji:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        await fsm.set_block_data(max_user_id, "post_gen", {"use_emoji": value == "yes"})
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "📋 *Генерация поста — AI*\n\n"
+                "Комментарии в канале подключены?\n\n"
+                "Если нет — бот не будет просить читателей писать ответы "
+                "и вместо этого предложит ставить реакции."
+            ),
+            attachments=[InlineKeyboardBuilder.ai_post_gen_comments_toggle()],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:post_gen:comments:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        await fsm.set_block_data(max_user_id, "post_gen", {"comments_enabled": value == "yes"})
+        await _ask_brief(max_user_id, max_client, "ai")
         return True
 
     if callback_data.startswith("ai:post_gen:approve"):
@@ -125,7 +200,8 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
             review = json.loads(raw)
             data = {"user_input": review["input"]}
             if review["mode"] == "ai":
-                data["generated_post"] = review["post"]
+                # Preview only for info; runtime regenerates from user_input.
+                data["generated_post"] = review.get("post", "")
             else:
                 data["generated_post"] = review["input"]
             await fsm.set_block_data(max_user_id, "post_gen", data)
@@ -159,7 +235,18 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         st = await fsm.get_state(max_user_id)
         channel = await channel_repo.get_by_id(st["channel_id"]) if st and st.get("channel_id") else None
         ch_title = channel.title if channel else ""
-        generated_post = await _generate_post(openai_client, review["input"], ch_title)
+        post_block = (st or {}).get("blocks", {}).get("post_gen", {})
+        chat_id = channel.max_chat_id if channel else None
+        recent_topics = await fetch_recent_post_topics(max_client, chat_id)
+        generated_post = await generate_post_text(
+            openai_client,
+            review["input"],
+            ch_title,
+            bold_headings=bool(post_block.get("bold_headings", True)),
+            use_emoji=bool(post_block.get("use_emoji", True)),
+            comments_enabled=bool(post_block.get("comments_enabled", False)),
+            recent_topics=recent_topics,
+        )
 
         review["post"] = generated_post
         await redis.setex(f"ai_post_gen_review:{max_user_id}", REVIEW_TTL, json.dumps(review, ensure_ascii=False))
@@ -180,13 +267,17 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
             review = json.loads(raw)
             mode = review.get("mode", "ai")
         await redis.delete(f"ai_post_gen_review:{max_user_id}")
-        await redis.setex(f"ai_post_gen_wait:{max_user_id}", REDIS_TTL, mode)
+        await claim_text_input(redis, max_user_id, "post_gen", mode, REDIS_TTL)
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:post_gen:cancel"))
         builder.row(("На главную", "main_menu"))
 
-        text = "📋 Опиши тему заново:" if mode == "ai" else "📋 Отправь новый текст:"
+        text = (
+            "📋 Опиши бриф / правила заново:"
+            if mode == "ai"
+            else "📋 Отправь новый текст:"
+        )
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=text,
@@ -203,7 +294,12 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         state = await fsm.get_state(max_user_id)
         if state:
             block = state.get("blocks", {}).get("post_gen", {})
-            if block.get("enabled") and not block.get("generated_post"):
+            # AI mode is configured by brief; fixed by generated_post.
+            has_config = (
+                (block.get("mode") == "ai" and block.get("user_input"))
+                or (block.get("mode") != "ai" and block.get("generated_post"))
+            )
+            if block.get("enabled") and not has_config:
                 await fsm.toggle_block(max_user_id, "post_gen")
             await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
             state = await fsm.get_state(max_user_id)
@@ -238,14 +334,25 @@ async def handle_post_message(max_user_id: int, message_text: str, redis) -> boo
         state = await fsm.get_state(max_user_id)
         channel = await channel_repo.get_by_id(state["channel_id"]) if state and state.get("channel_id") else None
         ch_title = channel.title if channel else ""
+        post_block = (state or {}).get("blocks", {}).get("post_gen", {})
 
         if mode == "ai":
             await max_client.send_message_to_user(
                 user_id=max_user_id,
-                text="📋 Генерирую пост...",
+                text="📋 Генерирую превью поста...",
             )
 
-            generated_post = await _generate_post(openai_client, message_text, ch_title)
+            chat_id = channel.max_chat_id if channel else None
+            recent_topics = await fetch_recent_post_topics(max_client, chat_id)
+            generated_post = await generate_post_text(
+                openai_client,
+                message_text,
+                ch_title,
+                bold_headings=bool(post_block.get("bold_headings", True)),
+                use_emoji=bool(post_block.get("use_emoji", True)),
+                comments_enabled=bool(post_block.get("comments_enabled", False)),
+                recent_topics=recent_topics,
+            )
 
             review_data = json.dumps({
                 "mode": "ai",
@@ -256,7 +363,12 @@ async def handle_post_message(max_user_id: int, message_text: str, redis) -> boo
 
             await max_client.send_message_to_user(
                 user_id=max_user_id,
-                text=_post_review_text(generated_post),
+                text=(
+                    "📋 *Превью поста* (при каждом запуске пайплайна будет новый текст "
+                    "по твоему брифу)\n\n"
+                    f"{generated_post[:3000]}"
+                    + ("…" if len(generated_post) > 3000 else "")
+                ),
                 attachments=[InlineKeyboardBuilder.ai_post_gen_review("ai")],
                 fmt="markdown",
             )

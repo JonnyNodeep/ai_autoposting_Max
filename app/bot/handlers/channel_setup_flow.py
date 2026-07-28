@@ -102,44 +102,6 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
                 if await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
                     return
-                prefs_key = f"content_plan_prefs:{max_user_id}"
-                prefs_data = await redis.get(prefs_key)
-                if prefs_data and message_text:
-                    prefs = json.loads(prefs_data)
-                    prefs["user_text"] = message_text
-                    await redis.setex(prefs_key, 1800, json.dumps(prefs))
-
-                    from app.bot.handlers.content_plan import _settings_text
-                    await max_client.send_message_to_user(
-                        user_id=max_user_id,
-                        text=_settings_text(prefs),
-                        attachments=[InlineKeyboardBuilder.plan_settings(prefs)],
-                        fmt="markdown",
-                    )
-                    await max_client.close()
-                    return
-
-                plantime_custom_data = await redis.get(f"plantime_custom:{max_user_id}")
-                if plantime_custom_data and message_text:
-                    data = json.loads(plantime_custom_data)
-                    channel_id = int(data["channel_id"])
-                    days = int(data["days"])
-                    await redis.delete(f"plantime_custom:{max_user_id}")
-                    parsed = _parse_time(message_text)
-                    if parsed is None:
-                        await redis.setex(f"plantime_custom:{max_user_id}", 1800, json.dumps(data))
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
-                        )
-                        await max_client.close()
-                        return
-                    hour_msk, minute_msk = parsed
-                    hour_utc = (hour_msk - 3) % 24
-                    await _finish_plan_flow(max_user_id, channel_id, days, f"{hour_utc:02d}:{minute_msk:02d}", max_client)
-                    await max_client.close()
-                    return
-
                 style_prompt_data = await redis.get(f"style_prompt:{max_user_id}")
                 if style_prompt_data and message_text:
                     data = json.loads(style_prompt_data)
@@ -173,48 +135,6 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         text="👁️ Проанализировать визуальный стиль картинок в канале?",
                         attachments=[builder.build()],
                     )
-                    await max_client.close()
-                    return
-
-                custom_plan_data = await redis.get(f"custom_plan:{max_user_id}")
-                if custom_plan_data and message_text:
-                    parts = str(custom_plan_data).split(":")
-                    channel_id = int(parts[0])
-                    days = int(parts[1]) if len(parts) > 1 else 7
-                    await redis.delete(f"custom_plan:{max_user_id}")
-
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository,
-                    )
-                    from app.domain.entities.content_plan import ContentPlan
-                    from app.domain.entities.content_topic import ContentTopic, TopicStatus
-                    from app.application.content.generate_content import CreateContentPlanUseCase
-
-                    plan_repo = SQLAContentPlanRepository(session)
-                    topic_repo = SQLAContentTopicRepository(session)
-                    openai_client = OpenAIService()
-
-                    plan = await plan_repo.create(
-                        ContentPlan(channel_id=channel_id, duration_days=days)
-                    )
-
-                    lines = [l.strip() for l in message_text.strip().split("\n") if l.strip()]
-                    lines = [l.lstrip("-•*0123456789. ") for l in lines]
-                    for i, topic_text in enumerate(lines[:30]):
-                        await topic_repo.create(
-                            ContentTopic(
-                                plan_id=plan.id,
-                                topic=topic_text[:200],
-                                scheduled_date="",
-                                order=i,
-                                is_ai_generated=False,
-                                status=TopicStatus.PENDING,
-                            )
-                        )
-                    await session.commit()
-
-                    from app.bot.handlers.content_plan_helpers import _show_plan
-                    await _show_plan(plan.id, topic_repo, max_client, max_user_id)
                     await max_client.close()
                     return
 
@@ -261,7 +181,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         text=(
                             f"Настройка канала завершена!\n\n"
                             f"Посты будут выходить в *{hour_msk}:{minute_msk:02d} МСК* по умолчанию.\n"
-                            f"Ты сможешь изменить время при создании контент-плана."
+                            f"Дальше настрой автопостинг в AI Content Studio."
                         ),
                         attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
                         fmt="markdown",
@@ -288,237 +208,6 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     hour_utc = (hour_msk - 3) % 24
                     time_str = f"{hour_utc:02d}:{minute_msk:02d}"
                     await _process_slot_time(max_user_id, ch_id, slot_idx, time_str, channel_repo, session, max_client, hour_msk)
-                    await max_client.close()
-                    return
-
-                time_plan_id = await redis.get(f"plan_time:{max_user_id}")
-                if time_plan_id and message_text:
-                    plan_id = int(time_plan_id)
-                    await redis.delete(f"plan_time:{max_user_id}")
-                    parsed = _parse_time(message_text)
-                    if parsed is None:
-                        await redis.setex(f"plan_time:{max_user_id}", 1800, str(plan_id))
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
-                        )
-                        await max_client.close()
-                        return
-                    hour_msk, minute_msk = parsed
-                    hour_utc = (hour_msk - 3) % 24
-                    channel_repo = SQLAlchemyChannelRepository(session)
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository,
-                    )
-                    from app.bot.handlers.content_plan_helpers import _create_schedules, _show_plan_actions
-                    plan_repo = SQLAContentPlanRepository(session)
-                    topic_repo = SQLAContentTopicRepository(session)
-                    count = await _create_schedules(plan_id, hour_utc, plan_repo, topic_repo, channel_repo, session, minute_msk)
-                    await session.commit()
-                    plan = await plan_repo.get_by_id(plan_id)
-                    ch = await channel_repo.get_by_id(plan.channel_id) if plan else None
-                    await _show_plan_actions(plan_id, plan_repo, max_client, max_user_id, count, hour_msk, minute_msk, channel_title=ch.title if ch else "")
-                    await max_client.close()
-                    return
-
-                edittime_plan_id = await redis.get(f"plan_edittime:{max_user_id}")
-                if edittime_plan_id and message_text:
-                    plan_id = int(edittime_plan_id)
-                    await redis.delete(f"plan_edittime:{max_user_id}")
-                    parsed = _parse_time(message_text)
-                    if parsed is None:
-                        await redis.setex(f"plan_edittime:{max_user_id}", 1800, str(plan_id))
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
-                        )
-                        await max_client.close()
-                        return
-                    hour_msk, minute_msk = parsed
-                    hour_utc = (hour_msk - 3) % 24
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository,
-                    )
-                    from app.bot.handlers.content_plan_helpers import _create_schedules, _show_plan_actions
-                    plan_repo = SQLAContentPlanRepository(session)
-                    topic_repo = SQLAContentTopicRepository(session)
-
-                    count = await _create_schedules(plan_id, hour_utc, plan_repo, topic_repo, channel_repo, session, minute_msk)
-                    await session.commit()
-                    await _show_plan_actions(plan_id, plan_repo, max_client, max_user_id, count, hour_msk, minute_msk)
-                    await max_client.close()
-                    return
-
-                sedit_key = await redis.get(f"plan_sedit:{max_user_id}")
-                if sedit_key and message_text:
-                    parts = str(sedit_key).split(":")
-                    plan_id = int(parts[0])
-                    slot_idx = int(parts[1])
-                    await redis.delete(f"plan_sedit:{max_user_id}")
-                    parsed = _parse_time(message_text)
-                    if parsed is None:
-                        await redis.setex(f"plan_sedit:{max_user_id}", 1800, str(sedit_key))
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
-                        )
-                        await max_client.close()
-                        return
-                    hour_msk, minute_msk = parsed
-                    hour_utc = (hour_msk - 3) % 24
-
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository,
-                    )
-                    from app.infrastructure.repositories.publish_schedule_repository import SQLAPublishScheduleRepository
-                    from app.domain.entities.publish_schedule import ScheduleStatus
-                    from app.domain.entities.content_post import PostStatus
-                    from app.infrastructure.models.content_post import ContentPostModel
-                    from sqlalchemy import select
-
-                    plan_repo_local = SQLAContentPlanRepository(session)
-                    topic_repo_local = SQLAContentTopicRepository(session)
-                    schedule_repo_local = SQLAPublishScheduleRepository(session)
-                    plan = await plan_repo_local.get_by_id(plan_id)
-
-                    topics_local = await topic_repo_local.get_by_plan(plan_id)
-                    topic_ids = [t.id for t in topics_local]
-                    pub_ids: set[int] = set()
-                    if topic_ids:
-                        stmt = select(ContentPostModel.topic_id).where(
-                            ContentPostModel.topic_id.in_(topic_ids),
-                            ContentPostModel.status == PostStatus.PUBLISHED.value,
-                        )
-                        result = await session.execute(stmt)
-                        pub_ids = {row[0] for row in result.fetchall()}
-
-                    ch = await channel_repo.get_by_id(plan.channel_id) if plan else None
-                    freq = ch.content_frequency if ch else "daily"
-                    slots_per_day = {"2x_day": 2, "3x_day": 3}.get(freq, 1)
-
-                    all_scheds = await schedule_repo_local.get_by_plan(plan_id)
-                    pending = [s for s in all_scheds if s.status != ScheduleStatus.PUBLISHED and s.topic_id not in pub_ids]
-
-                    active_count = 0
-                    for idx, s in enumerate(pending):
-                        if idx % slots_per_day != slot_idx:
-                            continue
-                        s.scheduled_at = s.scheduled_at.replace(hour=hour_utc, minute=minute_msk, second=0)
-                        await schedule_repo_local.update(s)
-                        active_count += 1
-                    await session.commit()
-                    from app.bot.handlers.content_plan_helpers import _show_plan_actions
-                    await _show_plan_actions(plan_id, plan_repo_local, max_client, max_user_id, active_count, hour_msk, minute_msk, channel_title=ch.title if ch else "")
-                    await max_client.close()
-                    return
-
-                custom_edit_sched_id = await redis.get(f"schedule_edit:{max_user_id}")
-                if custom_edit_sched_id and message_text:
-                    sched_id = int(custom_edit_sched_id)
-                    await redis.delete(f"schedule_edit:{max_user_id}")
-
-                    from app.infrastructure.repositories.publish_schedule_repository import SQLAPublishScheduleRepository
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository, SQLAContentPostRepository,
-                    )
-                    from app.application.content.generate_content import EditPostUseCase
-                    from app.bot.handlers.scheduler import _resend_review
-
-                    schedule_repo_local = SQLAPublishScheduleRepository(session)
-                    sched = await schedule_repo_local.get_by_id(sched_id)
-                    if not sched or not sched.post_id:
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text="Пост не найден.",
-                        )
-                        await max_client.close()
-                        return
-
-                    post_repo_local = SQLAContentPostRepository(session)
-                    post = await post_repo_local.get_by_id(sched.post_id)
-                    if not post:
-                        await max_client.close()
-                        return
-
-                    topic_repo_local = SQLAContentTopicRepository(session)
-                    topic = await topic_repo_local.get_by_id(post.topic_id)
-                    plan_repo_local = SQLAContentPlanRepository(session)
-                    plan = await plan_repo_local.get_by_id(topic.plan_id) if topic else None
-                    channel2 = await channel_repo.get_by_id(plan.channel_id) if plan else None
-
-                    openai_client_local = OpenAIService()
-                    style_dict = channel2.style_profile.to_dict() if channel2 else None
-
-                    await max_client.send_message_to_user(
-                        user_id=max_user_id,
-                        text="Редактирую пост по твоим пожеланиям...",
-                    )
-
-                    uc = EditPostUseCase(post_repo_local, openai_client_local)
-                    edited = await uc.execute(post.id, "custom", style_dict, custom_instruction=message_text)
-                    await session.commit()
-
-                    await _resend_review(sched, post_repo_local, max_client, max_user_id)
-                    await max_client.close()
-                    return
-
-                topic_edit_id = await redis.get(f"topic_edit:{max_user_id}")
-                if topic_edit_id and message_text:
-                    topic_id = int(topic_edit_id)
-                    await redis.delete(f"topic_edit:{max_user_id}")
-
-                    from app.infrastructure.repositories.content_repository import SQLAContentTopicRepository
-                    topic_repo_local = SQLAContentTopicRepository(session)
-                    topic = await topic_repo_local.get_by_id(topic_id)
-                    if not topic:
-                        await max_client.close()
-                        return
-
-                    topic.topic = message_text[:200]
-                    await topic_repo_local.update(topic)
-                    await session.commit()
-
-                    from app.bot.handlers.content_plan_helpers import _show_plan_edit
-                    from app.infrastructure.repositories.content_repository import SQLAContentPlanRepository
-                    plan_repo_local = SQLAContentPlanRepository(session)
-                    await _show_plan_edit(topic.plan_id, plan_repo_local, topic_repo_local, channel_repo, max_client, max_user_id)
-                    await max_client.close()
-                    return
-
-                topic_add_plan_id = await redis.get(f"topic_add:{max_user_id}")
-                if topic_add_plan_id and message_text:
-                    plan_id = int(topic_add_plan_id)
-                    await redis.delete(f"topic_add:{max_user_id}")
-
-                    from app.infrastructure.repositories.content_repository import (
-                        SQLAContentPlanRepository, SQLAContentTopicRepository,
-                    )
-                    from app.domain.entities.content_topic import ContentTopic, TopicStatus
-
-                    plan_repo_local = SQLAContentPlanRepository(session)
-                    topic_repo_local = SQLAContentTopicRepository(session)
-                    plan = await plan_repo_local.get_by_id(plan_id)
-                    if not plan:
-                        await max_client.close()
-                        return
-
-                    topics = await topic_repo_local.get_by_plan(plan_id)
-                    new_order = len(topics)
-                    await topic_repo_local.create(
-                        ContentTopic(
-                            plan_id=plan_id,
-                            topic=message_text[:200],
-                            scheduled_date="",
-                            order=new_order,
-                            is_ai_generated=False,
-                            status=TopicStatus.PENDING,
-                        )
-                    )
-                    await session.commit()
-
-                    from app.bot.handlers.content_plan_helpers import _show_plan_edit
-                    ch_repo2 = SQLAlchemyChannelRepository(session)
-                    await _show_plan_edit(plan_id, plan_repo_local, topic_repo_local, ch_repo2, max_client, max_user_id)
                     await max_client.close()
                     return
 
@@ -949,7 +638,7 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                             text=(
                                 f"Настройка канала завершена!\n\n"
                                 f"Посты будут выходить в *{hour_msk}:00 МСК* по умолчанию.\n"
-                                f"Ты сможешь изменить время при создании контент-плана."
+                                f"Дальше настрой автопостинг в AI Content Studio."
                             ),
                             attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
                             fmt="markdown",
@@ -1029,12 +718,6 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
             await session.commit()
 
 
-async def _finish_plan_flow(max_user_id, channel_id, days, time_str, max_client, freq_key=None, times_list=None):
-    from app.bot.handlers.new_plan_callbacks import _finish_plan_flow as finish_plan_flow
-
-    return await finish_plan_flow(max_user_id, channel_id, days, time_str, max_client, freq_key, times_list)
-
-
 async def finish_setup(
     max_user_id: int,
     fsm: ChannelSetupFSM,
@@ -1060,19 +743,19 @@ async def finish_setup(
         )
         return
 
-    ch = await channel_repo.get_by_id(ch_id)
-    freq = ch.content_frequency if ch else "daily"
-    has_time = ch.style_profile.default_time or ch.style_profile.default_times if ch else False
-
+    builder = InlineKeyboardBuilder()
+    builder.row(("🤖 AI Content Studio", "ai_studio"))
+    builder.row(("На главную", "main_menu"))
     await max_client.send_message_to_user(
         user_id=max_user_id,
         text=(
             "Настройка канала завершена!\n\n"
-            "Хочешь создать контент-план?"
+            "Дальше настрой автопостинг в *AI Content Studio*."
         ),
-        attachments=[InlineKeyboardBuilder.plan_creation_prompt(ch_id)],
+        attachments=[builder.build()],
         fmt="markdown",
     )
+
 
 
 
@@ -1112,17 +795,6 @@ async def _process_slot_time(max_user_id, ch_id, slot_idx, time_str, channel_rep
             await session.commit()
         from app.infrastructure.services.openai_client import OpenAIService
         openai_svc = OpenAIService()
-
-        if state.get("flow") == "plan":
-            channel_id = state.get("ch_id")
-            redis_local2 = await get_redis()
-            flow_data = await redis_local2.get(f"planflow_freq:{max_user_id}")
-            if flow_data:
-                fd = json.loads(flow_data)
-                days = fd["days"]
-                freq_key = fd["freq"]
-                await _finish_plan_flow(max_user_id, channel_id, days, None, max_client, freq_key, state["times"])
-                return
 
         await _continue_setup_after_time(max_user_id, ch_id, channel_repo, openai_svc, max_client, session)
     else:

@@ -1,5 +1,6 @@
 import json
 
+from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep
 from app.infrastructure.database.session import async_session_factory
@@ -68,7 +69,7 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
 
     if callback_data.startswith("ai:block:schedule:time:custom"):
         redis = await get_redis()
-        await redis.setex(f"ai_schedule_custom_time:{max_user_id}", REDIS_TTL, "1")
+        await claim_text_input(redis, max_user_id, "schedule_custom", "1", REDIS_TTL)
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:back_to_blocks"))
@@ -131,7 +132,7 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
 
     parsed = parse_time_hh_mm(message_text)
     if parsed is None:
-        await redis.setex(f"ai_schedule_custom_time:{max_user_id}", REDIS_TTL, "1")
+        await claim_text_input(redis, max_user_id, "schedule_custom", "1", REDIS_TTL)
         max_client = MaxAPIHTTPClient()
         await max_client.send_message_to_user(
             user_id=max_user_id,

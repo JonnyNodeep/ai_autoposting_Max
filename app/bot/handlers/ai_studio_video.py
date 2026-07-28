@@ -2,6 +2,7 @@ import json
 
 from loguru import logger
 
+from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, VIDEO_MODELS
 from app.infrastructure.database.session import async_session_factory
@@ -92,7 +93,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
         await fsm.set_block_data(max_user_id, "video_gen", {"prompt_mode": mode})
 
         redis = await get_redis()
-        await redis.setex(f"ai_video_prompt_wait:{max_user_id}", REDIS_TTL, mode)
+        await claim_text_input(redis, max_user_id, "video_prompt", mode, REDIS_TTL)
 
         state = await fsm.get_state(max_user_id)
         block = state.get("blocks", {}).get("video_gen", {})
@@ -189,7 +190,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
         mode = "ai"
         if state:
             mode = state.get("blocks", {}).get("video_gen", {}).get("prompt_mode", "ai")
-        await redis.setex(f"ai_video_prompt_wait:{max_user_id}", REDIS_TTL, mode)
+        await claim_text_input(redis, max_user_id, "video_prompt", mode, REDIS_TTL)
 
         state = await fsm.get_state(max_user_id)
         block = state.get("blocks", {}).get("video_gen", {}) if state else {}

@@ -1,5 +1,7 @@
+from app.bot.ai_studio_text_input import clear_text_inputs
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, IMAGE_MODELS, VIDEO_MODELS
+from app.infrastructure.redis.client import get_redis
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 from app.infrastructure.services.openai_client import OpenAIService
@@ -124,6 +126,9 @@ async def handle_entry_callback(
             await _session_expired(max_user_id, max_client)
             return True
 
+        redis = await get_redis()
+        await clear_text_inputs(redis, max_user_id)
+
         await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
         state = await fsm.get_state(max_user_id)
 
@@ -165,10 +170,21 @@ async def handle_entry_callback(
 
         img_prompt = blocks.get("image_prompt", {})
         if img_prompt.get("enabled"):
-            prompt = img_prompt.get("generated_prompt", "") or img_prompt.get("user_description", "")
-            preview = prompt[:200] + "…" if len(prompt) > 200 else prompt
-            lines.append(f"📝 *Промпт:* {preview}")
-            lines.append(f"📝 *Режим:* {'AI' if img_prompt.get('mode') == 'ai' else 'Готовый'}")
+            mode = img_prompt.get("mode", "ai")
+            if mode == "from_post":
+                lines.append("📝 *Режим:* Картинка по тексту поста")
+                instruction = img_prompt.get("instruction") or "Сгенерируй картинку для этого поста"
+                ipreview = instruction[:200] + "…" if len(instruction) > 200 else instruction
+                lines.append(f"📝 *Инструкция:* {ipreview}")
+            else:
+                prompt = img_prompt.get("generated_prompt", "") or img_prompt.get("user_description", "")
+                preview = prompt[:200] + "…" if len(prompt) > 200 else prompt
+                lines.append(f"📝 *Промпт:* {preview}")
+                lines.append(f"📝 *Режим:* {'AI' if mode == 'ai' else 'Готовый'}")
+            use_vs = img_prompt.get("use_visual_style")
+            if use_vs is None:
+                use_vs = mode == "from_post"
+            lines.append(f"📝 *Визуальный стиль:* {'Да' if use_vs else 'Нет'}")
 
         video = blocks.get("video_gen", {})
         if video.get("enabled"):
@@ -185,12 +201,30 @@ async def handle_entry_callback(
 
         post = blocks.get("post_gen", {})
         if post.get("enabled"):
-            mode_display = "AI" if post.get("mode") == "ai" else "Готовый текст"
+            mode_display = (
+                "AI (каждый запуск)" if post.get("mode") == "ai" else "Готовый текст"
+            )
             lines.append(f"📋 *Режим:* {mode_display}")
             lines.append(f"📋 *Ссылка на канал:* {'Да' if post.get('add_channel_link') else 'Нет'}")
-            post_text = post.get("generated_post", "")
-            ppreview = post_text[:200] + "…" if len(post_text) > 200 else post_text
-            lines.append(f"📋 *Текст:* {ppreview}")
+            if post.get("mode") == "ai":
+                lines.append(
+                    f"📋 *Жирный заголовок/подзаголовки:* "
+                    f"{'Да' if post.get('bold_headings', True) else 'Нет'}"
+                )
+                lines.append(
+                    f"📋 *Эмодзи:* {'Да' if post.get('use_emoji', True) else 'Нет'}"
+                )
+                lines.append(
+                    f"📋 *Комментарии:* "
+                    f"{'Да' if post.get('comments_enabled', False) else 'Нет'}"
+                )
+                brief = post.get("user_input", "")
+                bpreview = brief[:200] + "…" if len(brief) > 200 else brief
+                lines.append(f"📋 *Бриф:* {bpreview}")
+            else:
+                post_text = post.get("generated_post", "")
+                ppreview = post_text[:200] + "…" if len(post_text) > 200 else post_text
+                lines.append(f"📋 *Текст:* {ppreview}")
 
         from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 
@@ -255,24 +289,25 @@ async def _generate_video_prompt(openai_client: OpenAIService, user_description:
     return result.strip()
 
 
-async def _generate_post(openai_client: OpenAIService, user_description: str, channel_title: str) -> str:
-    system_prompt = (
-        "Ты — профессиональный копирайтер и автор контента для каналов MAX. "
-        "Твоя задача — написать интересный, вовлекающий пост на основе описания пользователя."
+async def _generate_post(
+    openai_client: OpenAIService,
+    user_description: str,
+    channel_title: str,
+    *,
+    bold_headings: bool = True,
+    use_emoji: bool = True,
+    comments_enabled: bool = False,
+) -> str:
+    from app.application.pipeline.generate_post import generate_post_text
+
+    return await generate_post_text(
+        openai_client,
+        user_description,
+        channel_title,
+        bold_headings=bold_headings,
+        use_emoji=use_emoji,
+        comments_enabled=comments_enabled,
     )
-    user_prompt = (
-        f"Напиши пост для канала «{channel_title}» на основе этого описания:\n\n"
-        f"«{user_description}»\n\n"
-        f"Правила:\n"
-        f"- Язык: русский\n"
-        f"- Заголовок: яркий, привлекающий внимание\n"
-        f"- Текст: информативный, полезный, с фактами и примерами\n"
-        f"- CTA: призыв к действию в конце (подписаться, поделиться, прокомментировать)\n"
-        f"- Длина: 600-2000 символов\n"
-        f"- Ответ — ТОЛЬКО готовый пост, без пояснений"
-    )
-    result = await openai_client.generate_text(prompt=user_prompt, system_prompt=system_prompt)
-    return result.strip()
 
 
 def _post_review_text(post_text: str) -> str:

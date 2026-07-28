@@ -1,5 +1,6 @@
 import json
 
+from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, IMAGE_MODELS
 from app.infrastructure.database.session import async_session_factory
@@ -76,11 +77,16 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         current_mode = block.get("mode", "ai")
         await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
 
+        mode_labels = {
+            "ai": "AI",
+            "fixed": "Готовый промпт",
+            "from_post": "Картинка по тексту поста",
+        }
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
                 f"📝 *Промпт для изображений — режим*\n\n"
-                f"Текущий: {'AI' if current_mode == 'ai' else 'Готовый промпт'}"
+                f"Текущий: {mode_labels.get(current_mode, current_mode)}"
             ),
             attachments=[InlineKeyboardBuilder.ai_prompt_mode_select("image_prompt")],
             fmt="markdown",
@@ -96,9 +102,80 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
             return True
 
         await fsm.set_block_data(max_user_id, "image_prompt", {"mode": mode})
+        await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
+
+        hint = (
+            "Для «картинки по тексту поста» обычно стоит включить "
+            "(стиль канала из анализа картинок)."
+            if mode == "from_post"
+            else "Для готового/AI промпта (открытки) обычно лучше выключить, "
+            "чтобы не ломать заданный промпт."
+        )
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "📝 *Промпт для изображений*\n\n"
+                "Подмешивать визуальный стиль канала в промпт?\n\n"
+                f"{hint}"
+            ),
+            attachments=[InlineKeyboardBuilder.ai_image_prompt_visual_style_toggle()],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:image_prompt:visual:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        use_vs = value == "yes"
+        await fsm.set_block_data(max_user_id, "image_prompt", {"use_visual_style": use_vs})
+        state = await fsm.get_state(max_user_id)
+        mode = state.get("blocks", {}).get("image_prompt", {}).get("mode", "ai")
+
+        if mode == "from_post":
+            await fsm.set_block_data(
+                max_user_id,
+                "image_prompt",
+                {
+                    "instruction": "Сгенерируй картинку для этого поста",
+                    "generated_prompt": "",
+                    "user_description": "",
+                },
+            )
+            img_gen = state.get("blocks", {}).get("image_gen", {})
+            if not img_gen.get("enabled"):
+                await fsm.toggle_block(max_user_id, "image_gen")
+
+            state = await fsm.get_state(max_user_id)
+            post = state.get("blocks", {}).get("post_gen", {})
+            post_ready = bool(
+                (post.get("generated_post") or "").strip()
+                or (post.get("mode") == "ai" and (post.get("user_input") or "").strip())
+            )
+            hint = (
+                "Текст/бриф поста уже есть — можно запускать тест."
+                if post_ready
+                else "Сначала настрой блок «📋 Генерация поста» — его текст станет основой картинки."
+            )
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    "🖼 *Картинка по тексту поста*\n\n"
+                    "Промпт для изображения будет собран из текста поста.\n"
+                    f"Визуальный стиль: {'вкл' if use_vs else 'выкл'}.\n\n"
+                    f"{hint}"
+                ),
+                fmt="markdown",
+            )
+            await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
+            return True
 
         redis = await get_redis()
-        await redis.setex(f"ai_image_prompt_wait:{max_user_id}", REDIS_TTL, mode)
+        await claim_text_input(redis, max_user_id, "image_prompt", mode, REDIS_TTL)
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:image_prompt:cancel"))
@@ -192,7 +269,7 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         mode = "ai"
         if state:
             mode = state.get("blocks", {}).get("image_prompt", {}).get("mode", "ai")
-        await redis.setex(f"ai_image_prompt_wait:{max_user_id}", REDIS_TTL, mode)
+        await claim_text_input(redis, max_user_id, "image_prompt", mode, REDIS_TTL)
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:image_prompt:cancel"))
@@ -215,7 +292,12 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         state = await fsm.get_state(max_user_id)
         if state:
             block = state.get("blocks", {}).get("image_prompt", {})
-            if block.get("enabled") and not block.get("generated_prompt"):
+            # from_post needs no generated_prompt — keep enabled
+            if (
+                block.get("enabled")
+                and block.get("mode") != "from_post"
+                and not block.get("generated_prompt")
+            ):
                 await fsm.toggle_block(max_user_id, "image_prompt")
             await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
             state = await fsm.get_state(max_user_id)

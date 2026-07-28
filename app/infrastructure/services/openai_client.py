@@ -42,18 +42,29 @@ class OpenAIService(OpenAIClient):
             size="1024x1024",
         )
         image_data = response.data[0]
-        if image_data.url:
-            return image_data.url
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"logo_{uuid.uuid4().hex[:12]}.png"
+        filepath = UPLOAD_DIR / filename
+
         if image_data.b64_json:
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            filename = f"logo_{uuid.uuid4().hex[:12]}.png"
-            filepath = UPLOAD_DIR / filename
             filepath.write_bytes(base64.b64decode(image_data.b64_json))
-            if channel_link:
-                slug = channel_link.rstrip("/").split("/")[-1]
+        elif image_data.url:
+            if not channel_link:
+                return image_data.url
+            import httpx
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(image_data.url)
+                resp.raise_for_status()
+                filepath.write_bytes(resp.content)
+        else:
+            return ""
+
+        if channel_link:
+            slug = channel_link.rstrip("/").split("/")[-1]
+            if slug:
                 _apply_watermark(str(filepath), slug)
-            return str(filepath)
-        return ""
+        return str(filepath)
 
     async def analyze_vision(self, prompt: str, base64_images: list[str]) -> str:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]

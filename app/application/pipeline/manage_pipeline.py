@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, UTC
+from typing import Any
 
 from loguru import logger
 
+from app.application.pipeline.normalize import ui_dict_to_v2
 from app.domain.entities.pipeline_run import PipelineRun, PipelineStatus
 from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 from app.infrastructure.scheduler.service import scheduler_service
@@ -17,7 +19,7 @@ class PipelineManager:
         max_user_id: int,
         channel_id: int,
         channel_link: str,
-        blocks_config: dict,
+        blocks_config: dict[str, Any],
         frequency: str,
         times: list[str],
     ) -> PipelineRun:
@@ -29,12 +31,15 @@ class PipelineManager:
         now = datetime.now(UTC)
         next_run = self._calc_next_run(times, now)
 
+        # Persist canonical v2; accept legacy UI dict from bot FSM
+        stored = ui_dict_to_v2(blocks_config) if blocks_config.get("version") != 2 else blocks_config
+
         run = PipelineRun(
             user_id=user_id,
             max_user_id=max_user_id,
             channel_id=channel_id,
             channel_link=channel_link,
-            blocks_config=blocks_config,
+            blocks_config=stored,
             frequency=frequency,
             times=times,
             status=PipelineStatus.ACTIVE,

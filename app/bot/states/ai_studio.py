@@ -34,6 +34,8 @@ DEFAULT_BLOCKS = {
         "mode": "ai",
         "user_description": "",
         "generated_prompt": "",
+        "instruction": "Сгенерируй картинку для этого поста",
+        "use_visual_style": False,
     },
     "video_gen": {
         "enabled": False,
@@ -51,6 +53,9 @@ DEFAULT_BLOCKS = {
         "user_input": "",
         "generated_post": "",
         "add_channel_link": False,
+        "bold_headings": True,
+        "use_emoji": True,
+        "comments_enabled": False,
     },
     "schedule": {
         "enabled": False,
@@ -127,8 +132,15 @@ class AIStudioFSM:
         if "pipelines" not in state:
             state["pipelines"] = {}
         channel_key = str(channel_id)
+        from app.application.pipeline.normalize import steps_to_ui_dict
+
         if channel_key in state["pipelines"]:
-            state["blocks"] = {k: dict(v) for k, v in state["pipelines"][channel_key].items()}
+            raw = state["pipelines"][channel_key]
+            # pipelines cache may be UI dict or (rarely) v2
+            if isinstance(raw, dict) and raw.get("version") == 2:
+                state["blocks"] = steps_to_ui_dict(raw)
+            else:
+                state["blocks"] = {k: dict(v) for k, v in raw.items()}
         else:
             state["blocks"] = {k: dict(v) for k, v in DEFAULT_BLOCKS.items()}
 
