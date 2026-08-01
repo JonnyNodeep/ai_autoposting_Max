@@ -52,13 +52,13 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                     _owns_channel,
                 ):
                     return
-                if await handle_image_callback(callback_data, max_user_id, max_client, channel_repo):
+                if await handle_image_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
-                if await handle_video_callback(callback_data, max_user_id, max_client, channel_repo):
+                if await handle_video_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
-                if await handle_post_callback(callback_data, max_user_id, max_client, channel_repo):
+                if await handle_post_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
-                if await handle_schedule_callback(callback_data, max_user_id, max_client, channel_repo):
+                if await handle_schedule_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
                 if await handle_pipeline_callback(
                     callback_data,

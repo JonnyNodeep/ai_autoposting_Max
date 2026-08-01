@@ -148,6 +148,7 @@ class SchedulerService:
                 if run.times:
                     run.next_run_at = PipelineManager._calc_next_run(run.times, now)
                 await repo.update(run)
+                await session.commit()
 
                 logger.info(f"Pipeline {run_id} step completed")
         except Exception as e:

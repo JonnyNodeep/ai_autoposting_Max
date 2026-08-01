@@ -1,3 +1,5 @@
+from typing import Any
+
 from loguru import logger
 
 from app.bot.keyboards.builder import InlineKeyboardBuilder
@@ -5,6 +7,25 @@ from app.bot.states.ai_studio import AIStudioFSM
 from app.infrastructure.services.openai_client import OpenAIService
 
 from app.bot.handlers.ai_studio_entry import _model_name, _session_expired, _show_blocks
+
+
+async def sync_active_pipeline(session, state: dict[str, Any] | None) -> bool:
+    """Push FSM blocks into the active run (if any). Returns True if a run was touched."""
+    if not state or not state.get("channel_id"):
+        return False
+
+    from app.application.pipeline.manage_pipeline import PipelineManager
+    from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
+
+    repo = SQLAPipelineRunRepository(session)
+    mgr = PipelineManager(repo)
+    active = await mgr.get_active_for_channel(state["channel_id"])
+    if not active:
+        return False
+
+    await mgr.update_active_config(state["channel_id"], state.get("blocks") or {})
+    await session.commit()
+    return True
 
 
 async def handle_pipeline_callback(

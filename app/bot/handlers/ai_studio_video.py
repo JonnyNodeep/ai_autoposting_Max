@@ -19,9 +19,10 @@ from app.bot.handlers.ai_studio_entry import (
     _show_blocks,
     _video_model_name,
 )
+from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
 
 
-async def handle_video_callback(callback_data: str, max_user_id: int, max_client, channel_repo) -> bool:
+async def handle_video_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
     if callback_data.startswith("ai:edit:video_gen"):
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -59,7 +60,14 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
             return True
 
         defaults = {
-            "grok-imagine": {"duration": 6, "mode": "normal"},
+            "seedance-1.5-pro": {
+                "duration": 4,
+                "resolution": "480p",
+                "aspect_ratio": "9:16",
+                "fixed_lens": False,
+                "generate_audio": False,
+                "fallback_model": "wan2.5-image-to-video",
+            },
             "wan2.5-image-to-video": {"duration": 5, "resolution": "720p"},
         }
         block_data = {"model": model_id}
@@ -97,7 +105,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
 
         state = await fsm.get_state(max_user_id)
         block = state.get("blocks", {}).get("video_gen", {})
-        model_id = block.get("model", "grok-imagine")
+        model_id = block.get("model", VIDEO_MODELS[0][0])
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:video_prompt:cancel"))
@@ -147,6 +155,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
             return True
 
         state = await fsm.get_state(max_user_id)
+        await sync_active_pipeline(session, state)
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
 
@@ -194,7 +203,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
 
         state = await fsm.get_state(max_user_id)
         block = state.get("blocks", {}).get("video_gen", {}) if state else {}
-        model_id = block.get("model", "grok-imagine")
+        model_id = block.get("model", VIDEO_MODELS[0][0])
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:video_prompt:cancel"))
@@ -222,6 +231,7 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
                 await fsm.toggle_block(max_user_id, "video_gen")
             await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
             state = await fsm.get_state(max_user_id)
+            await sync_active_pipeline(session, state)
             await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         else:
             await max_client.send_message_to_user(
@@ -315,26 +325,18 @@ async def _run_video_test(
         else:
             vidgo_image_url = await vidgo.upload_image(image_url)
 
-        logger.info(f"AI Studio test: submitting video, model={video_block['model']}")
-        task_id = await vidgo.submit_video(
-            model=video_block["model"],
-            prompt=video_block["generated_prompt"],
-            image_url=vidgo_image_url,
-            duration=video_block.get("duration", 6),
-            mode=video_block.get("mode", "normal"),
-            resolution=video_block.get("resolution", "720p"),
-            task_meta={
-                "kind": "ai_test",
-                "max_user_id": max_user_id,
-                "channel_link": channel_link,
-            },
-        )
+        logger.info(f"AI Studio test: submitting video, model={video_block.get('model')}")
 
+        from app.infrastructure.services.vidgo_client import resolve_video_model
+
+        primary_model = resolve_video_model(video_block.get("model"))
         model_display = ""
         for m_id, m_name in VIDEO_MODELS:
-            if m_id == video_block["model"]:
+            if m_id == primary_model:
                 model_display = m_name
                 break
+        if not model_display:
+            model_display = primary_model
 
         await max_client.send_message_to_user(
             user_id=max_user_id,
@@ -354,7 +356,18 @@ async def _run_video_test(
                 fmt="markdown",
             )
 
-        result = await vidgo.wait_for_task(task_id, timeout=900, on_progress=_on_progress)
+        result = await vidgo.generate_video_with_fallback(
+            prompt=video_block["generated_prompt"],
+            image_url=vidgo_image_url,
+            config=video_block,
+            task_meta={
+                "kind": "ai_test",
+                "max_user_id": max_user_id,
+                "channel_link": channel_link,
+            },
+            timeout=900,
+            on_progress=_on_progress,
+        )
         video_url = result["files"][0]["file_url"]
 
         await max_client.send_message_to_user(

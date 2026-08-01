@@ -20,7 +20,7 @@ IMAGE_MODELS = [
 ]
 
 VIDEO_MODELS = [
-    ("grok-imagine", "Grok Imagine — 6s"),
+    ("seedance-1.5-pro", "Seedance 1.5 Pro — 480p, 4s"),
     ("wan2.5-image-to-video", "Wan 2.5 — 720p, 5s"),
 ]
 
@@ -40,9 +40,13 @@ DEFAULT_BLOCKS = {
     "video_gen": {
         "enabled": False,
         "model": VIDEO_MODELS[0][0],
-        "duration": 6,
+        "duration": 4,
         "mode": "normal",
-        "resolution": "720p",
+        "resolution": "480p",
+        "aspect_ratio": "9:16",
+        "fixed_lens": False,
+        "generate_audio": False,
+        "fallback_model": "wan2.5-image-to-video",
         "prompt_mode": "ai",
         "user_description": "",
         "generated_prompt": "",

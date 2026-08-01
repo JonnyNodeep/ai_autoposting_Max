@@ -67,6 +67,45 @@ class PipelineManager:
     async def get_active_for_channel(self, channel_id: int) -> PipelineRun | None:
         return await self._repo.get_active_by_channel(channel_id)
 
+    async def update_active_config(
+        self,
+        channel_id: int,
+        blocks_config: dict[str, Any],
+    ) -> PipelineRun | None:
+        """Push FSM/UI blocks into the active run and refresh cron jobs.
+
+        Returns the updated run, or None if there is no active pipeline.
+        Stops the pipeline when schedule is disabled or times are empty.
+        """
+        run = await self._repo.get_active_by_channel(channel_id)
+        if not run or not run.id:
+            return None
+
+        stored = ui_dict_to_v2(blocks_config) if blocks_config.get("version") != 2 else blocks_config
+        schedule = stored.get("schedule") or {}
+        enabled = bool(schedule.get("enabled", False))
+        times = list(schedule.get("times") or [])
+        frequency = schedule.get("frequency") or "daily"
+
+        if not enabled or not times:
+            await self.stop(run.id)
+            return None
+
+        now = datetime.now(UTC)
+        run.blocks_config = stored
+        run.frequency = frequency
+        run.times = times
+        run.next_run_at = self._calc_next_run(times, now)
+        await self._repo.update(run)
+
+        scheduler_service.remove_pipeline_job(run.id)
+        scheduler_service.add_pipeline_job(run.id, times, run.channel_link)
+        logger.info(
+            f"Pipeline config synced: run_id={run.id} channel_id={channel_id} "
+            f"frequency={frequency} times={times}"
+        )
+        return run
+
     @staticmethod
     def _calc_next_run(times: list[str], now: datetime) -> datetime:
         today = now.replace(minute=0, second=0, microsecond=0)

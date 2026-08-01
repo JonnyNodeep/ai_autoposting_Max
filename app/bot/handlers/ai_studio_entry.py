@@ -27,10 +27,13 @@ def _model_name(model_id: str) -> str:
 
 
 def _video_model_name(model_id: str) -> str:
+    from app.infrastructure.services.vidgo_client import resolve_video_model
+
+    resolved = resolve_video_model(model_id)
     for m_id, m_name in VIDEO_MODELS:
-        if m_id == model_id:
+        if m_id == resolved:
             return m_name
-    return model_id
+    return resolved
 
 
 def _escape_md(text: str) -> str:
@@ -115,6 +118,21 @@ async def handle_entry_callback(
             return True
         await fsm.set_channel(max_user_id, channel_id)
         state = await fsm.get_state(max_user_id)
+
+        from app.application.pipeline.normalize import steps_to_ui_dict
+        from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
+
+        active_run = await SQLAPipelineRunRepository(session).get_active_by_channel(channel_id)
+        if active_run and active_run.blocks_config:
+            ui_blocks = steps_to_ui_dict(active_run.blocks_config)
+            await fsm.set_data(max_user_id, {"blocks": ui_blocks})
+            state = await fsm.get_state(max_user_id)
+            # Keep per-channel cache aligned with the running config
+            if state is not None:
+                pipes = state.get("pipelines") or {}
+                pipes[str(channel_id)] = {k: dict(v) for k, v in ui_blocks.items()}
+                await fsm.set_data(max_user_id, {"pipelines": pipes})
+                state = await fsm.get_state(max_user_id)
 
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
@@ -272,7 +290,7 @@ async def _generate_video_prompt(openai_client: OpenAIService, user_description:
     system_prompt = (
         "Ты — профессиональный prompt-инженер для AI-генерации видео из изображения. "
         "Твоя задача — превратить описание движения/анимации от пользователя в детальный, "
-        "эффективный промпт на русском языке для моделей image-to-video (Grok Imagine, Wan 2.5)."
+        "эффективный промпт на русском языке для моделей image-to-video (Seedance 1.5 Pro, Wan 2.5)."
     )
     user_prompt = (
         f"Создай промпт для анимации изображения на основе этого описания движения:\n\n"

@@ -92,3 +92,120 @@ async def test_stop_by_channel():
 
     assert existing.status == PipelineStatus.STOPPED
     sched.remove_pipeline_job.assert_called_once_with(7)
+
+
+@pytest.mark.asyncio
+async def test_update_active_config_refreshes_jobs():
+    repo = AsyncMock()
+    existing = PipelineRun(
+        id=11,
+        user_id=1,
+        max_user_id=10,
+        channel_id=1,
+        channel_link="https://max.ru/pp",
+        blocks_config={},
+        frequency="2x_day",
+        times=["05:00", "14:00"],
+        status=PipelineStatus.ACTIVE,
+    )
+    repo.get_active_by_channel = AsyncMock(return_value=existing)
+    repo.update = AsyncMock()
+
+    blocks = {
+        "schedule": {"enabled": True, "frequency": "3x_day", "times": ["05:00", "09:00", "15:00"]},
+        "post_gen": {"enabled": True, "mode": "ai", "user_input": "brief"},
+    }
+
+    with patch("app.application.pipeline.manage_pipeline.scheduler_service") as sched:
+        sched.remove_pipeline_job = MagicMock()
+        sched.add_pipeline_job = MagicMock()
+        mgr = PipelineManager(repo)
+        run = await mgr.update_active_config(1, blocks)
+
+    assert run is existing
+    assert run.frequency == "3x_day"
+    assert run.times == ["05:00", "09:00", "15:00"]
+    assert run.blocks_config["version"] == 2
+    repo.update.assert_awaited()
+    sched.remove_pipeline_job.assert_called_once_with(11)
+    sched.add_pipeline_job.assert_called_once_with(11, ["05:00", "09:00", "15:00"], "https://max.ru/pp")
+
+
+@pytest.mark.asyncio
+async def test_update_active_config_stops_when_schedule_empty():
+    repo = AsyncMock()
+    existing = PipelineRun(
+        id=11,
+        user_id=1,
+        max_user_id=10,
+        channel_id=1,
+        channel_link="",
+        blocks_config={},
+        frequency="daily",
+        times=["09:00"],
+        status=PipelineStatus.ACTIVE,
+    )
+    repo.get_active_by_channel = AsyncMock(return_value=existing)
+    repo.get_by_id = AsyncMock(return_value=existing)
+    repo.update = AsyncMock()
+
+    with patch("app.application.pipeline.manage_pipeline.scheduler_service") as sched:
+        sched.remove_pipeline_job = MagicMock()
+        mgr = PipelineManager(repo)
+        result = await mgr.update_active_config(
+            1,
+            {"schedule": {"enabled": True, "frequency": "daily", "times": []}},
+        )
+
+    assert result is None
+    assert existing.status == PipelineStatus.STOPPED
+    sched.remove_pipeline_job.assert_called_once_with(11)
+
+
+@pytest.mark.asyncio
+async def test_update_active_config_stops_when_schedule_disabled():
+    repo = AsyncMock()
+    existing = PipelineRun(
+        id=11,
+        user_id=1,
+        max_user_id=10,
+        channel_id=1,
+        channel_link="",
+        blocks_config={},
+        frequency="daily",
+        times=["09:00"],
+        status=PipelineStatus.ACTIVE,
+    )
+    repo.get_active_by_channel = AsyncMock(return_value=existing)
+    repo.get_by_id = AsyncMock(return_value=existing)
+    repo.update = AsyncMock()
+
+    with patch("app.application.pipeline.manage_pipeline.scheduler_service") as sched:
+        sched.remove_pipeline_job = MagicMock()
+        mgr = PipelineManager(repo)
+        result = await mgr.update_active_config(
+            1,
+            {"schedule": {"enabled": False, "frequency": "daily", "times": ["09:00"]}},
+        )
+
+    assert result is None
+    assert existing.status == PipelineStatus.STOPPED
+    sched.remove_pipeline_job.assert_called_once_with(11)
+
+
+@pytest.mark.asyncio
+async def test_update_active_config_noop_without_active_run():
+    repo = AsyncMock()
+    repo.get_active_by_channel = AsyncMock(return_value=None)
+
+    with patch("app.application.pipeline.manage_pipeline.scheduler_service") as sched:
+        mgr = PipelineManager(repo)
+        result = await mgr.update_active_config(
+            1,
+            {"schedule": {"enabled": True, "frequency": "daily", "times": ["09:00"]}},
+        )
+
+    assert result is None
+    repo.update.assert_not_called()
+    sched.add_pipeline_job.assert_not_called()
+    sched.remove_pipeline_job.assert_not_called()

@@ -41,10 +41,14 @@ def test_ui_roundtrip_preserves_fields():
         "image_gen": {"enabled": True, "model": "gpt-image-2"},
         "video_gen": {
             "enabled": False,
-            "model": "grok-imagine",
-            "duration": 6,
+            "model": "seedance-1.5-pro",
+            "duration": 4,
             "mode": "normal",
-            "resolution": "720p",
+            "resolution": "480p",
+            "aspect_ratio": "9:16",
+            "fixed_lens": False,
+            "generate_audio": False,
+            "fallback_model": "wan2.5-image-to-video",
             "prompt_mode": "ai",
             "user_description": "",
             "generated_prompt": "",
@@ -71,6 +75,90 @@ def test_ui_roundtrip_preserves_fields():
     assert back["post_gen"]["comments_enabled"] is False
     assert back["schedule"]["times"] == ["10:00"]
     assert back["image_gen"]["model"] == "gpt-image-2"
+    assert back["video_gen"]["model"] == "seedance-1.5-pro"
+    assert back["video_gen"]["duration"] == 4
+    assert back["video_gen"]["aspect_ratio"] == "9:16"
+    assert back["video_gen"]["fallback_model"] == "wan2.5-image-to-video"
+    assert back["video_gen"]["generate_audio"] is False
+
+
+@pytest.mark.asyncio
+async def test_video_gen_calls_generate_with_fallback():
+    from unittest.mock import AsyncMock, patch
+
+    from app.application.pipeline.blocks.video_gen import VideoGenBlock
+
+    captured: dict = {}
+
+    class FakeVidGo:
+        async def generate_video_with_fallback(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return {"files": [{"file_url": "https://vidgo/out.mp4"}]}
+
+        async def close(self):
+            captured["closed"] = True
+
+    class FakeMax:
+        async def upload_file(self, path, kind):
+            captured["upload"] = (path, kind)
+            return "max-video-token"
+
+        async def send_message_to_user(self, **kwargs):
+            pass
+
+    class FakeResponse:
+        content = b"fake-mp4"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeHttp:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def get(self, url):
+            assert url == "https://vidgo/out.mp4"
+            return FakeResponse()
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=FakeMax(),
+        openai_client=None,
+        target="channel",
+    )
+    ctx.image_url = "https://cdn/img.png"
+    ctx.notify = AsyncMock()
+
+    with (
+        patch(
+            "app.infrastructure.services.vidgo_client.VidGoClient",
+            return_value=FakeVidGo(),
+        ),
+        patch("app.application.pipeline.blocks.video_gen.httpx.AsyncClient", FakeHttp),
+    ):
+        await VideoGenBlock().execute(
+            ctx,
+            {
+                "enabled": True,
+                "model": "seedance-1.5-pro",
+                "generated_prompt": "slow zoom",
+                "fallback_model": "wan2.5-image-to-video",
+            },
+        )
+
+    assert captured["kwargs"]["prompt"] == "slow zoom"
+    assert captured["kwargs"]["image_url"] == "https://cdn/img.png"
+    assert captured["kwargs"]["config"]["model"] == "seedance-1.5-pro"
+    assert ctx.video_token == "max-video-token"
+    assert captured.get("closed") is True
 
 
 @pytest.mark.asyncio

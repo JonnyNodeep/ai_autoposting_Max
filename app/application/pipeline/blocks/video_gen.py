@@ -46,16 +46,6 @@ class VideoGenBlock:
                     }
                 )
 
-            task_id = await vidgo.submit_video(
-                model=config.get("model", "grok-imagine"),
-                prompt=video_prompt,
-                image_url=vidgo_image_url,
-                duration=config.get("duration", 6),
-                mode=config.get("mode", "normal"),
-                resolution=config.get("resolution", "720p"),
-                task_meta=task_meta,
-            )
-
             await ctx.notify(
                 f"🎬 *Генерация видео — {ctx.channel_title}*\n\n"
                 f"Статус: обрабатывается...\n"
@@ -69,8 +59,13 @@ class VideoGenBlock:
                         f"Генерация: {elapsed // 60} мин..."
                     )
 
-            result = await vidgo.wait_for_task(
-                task_id, timeout=900, on_progress=_on_progress
+            result = await vidgo.generate_video_with_fallback(
+                prompt=video_prompt,
+                image_url=vidgo_image_url,
+                config=config,
+                task_meta=task_meta,
+                timeout=900,
+                on_progress=_on_progress,
             )
             video_url = result["files"][0]["file_url"]
 

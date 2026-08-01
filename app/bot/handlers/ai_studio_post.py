@@ -20,6 +20,7 @@ from app.bot.handlers.ai_studio_entry import (
     _session_expired,
     _show_blocks,
 )
+from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
 
 
 async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
@@ -52,7 +53,7 @@ async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
     )
 
 
-async def handle_post_callback(callback_data: str, max_user_id: int, max_client, channel_repo) -> bool:
+async def handle_post_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
     if callback_data.startswith("ai:edit:post_gen"):
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -214,6 +215,7 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
             return True
 
         state = await fsm.get_state(max_user_id)
+        await sync_active_pipeline(session, state)
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
 
@@ -303,6 +305,7 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
                 await fsm.toggle_block(max_user_id, "post_gen")
             await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
             state = await fsm.get_state(max_user_id)
+            await sync_active_pipeline(session, state)
             await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         else:
             await max_client.send_message_to_user(

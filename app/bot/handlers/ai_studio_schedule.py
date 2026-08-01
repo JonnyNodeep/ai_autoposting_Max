@@ -9,9 +9,10 @@ from app.infrastructure.repositories.channel_repository import SQLAlchemyChannel
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 
 from app.bot.handlers.ai_studio_entry import REDIS_TTL, _session_expired, _show_blocks
+from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
 
 
-async def handle_schedule_callback(callback_data: str, max_user_id: int, max_client, channel_repo) -> bool:
+async def handle_schedule_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
     if callback_data.startswith("ai:edit:schedule"):
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -105,6 +106,7 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
             await redis.delete(f"ai_schedule_slots:{max_user_id}")
             await fsm.set_block_data(max_user_id, "schedule", {"times": slot_state["times"]})
             state = await fsm.get_state(max_user_id)
+            await sync_active_pipeline(session, state)
             await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         else:
             slot_state["slot"] = slot_idx
@@ -166,6 +168,7 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
                 await redis2.delete(f"ai_schedule_slots:{max_user_id}")
                 await fsm.set_block_data(max_user_id, "schedule", {"times": slot_state["times"]})
                 state = await fsm.get_state(max_user_id)
+                await sync_active_pipeline(session, state)
                 await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
             else:
                 slot_state["slot"] = slot_idx
@@ -180,6 +183,7 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
         else:
             await fsm.set_block_data(max_user_id, "schedule", {"times": [time_str]})
             state = await fsm.get_state(max_user_id)
+            await sync_active_pipeline(session, state)
             await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
 
         await max_client.close()
