@@ -4,19 +4,40 @@ from typing import Literal
 
 from loguru import logger
 
-TextInputKind = Literal["image_prompt", "video_prompt", "post_gen", "schedule_custom"]
+TextInputKind = Literal[
+    "image_prompt",
+    "video_prompt",
+    "post_gen",
+    "story_gen",
+    "schedule_custom",
+    "schedule_slot_prompt",
+    "rss_feed",
+    "rss_site",
+    "rss_window",
+    "rss_topic_brief",
+    "topic_queue",
+]
 
 _WAIT_KEYS: dict[TextInputKind, str] = {
     "image_prompt": "ai_image_prompt_wait",
     "video_prompt": "ai_video_prompt_wait",
     "post_gen": "ai_post_gen_wait",
+    "story_gen": "ai_story_gen_wait",
     "schedule_custom": "ai_schedule_custom_time",
+    "schedule_slot_prompt": "ai_schedule_slot_prompt_wait",
+    "rss_feed": "ai_rss_feed_wait",
+    "rss_site": "ai_rss_site_wait",
+    "rss_window": "ai_rss_window_wait",
+    "rss_topic_brief": "ai_rss_topic_brief_wait",
+    "topic_queue": "ai_topic_queue_wait",
 }
 
 _REVIEW_KEYS: dict[TextInputKind, str] = {
     "image_prompt": "ai_image_prompt_review",
     "video_prompt": "ai_video_prompt_review",
     "post_gen": "ai_post_gen_review",
+    "story_gen": "ai_story_gen_review",
+    "topic_queue": "ai_topic_queue_review",
 }
 
 

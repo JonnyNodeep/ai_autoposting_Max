@@ -24,10 +24,35 @@ VIDEO_MODELS = [
     ("wan2.5-image-to-video", "Wan 2.5 — 720p, 5s"),
 ]
 
+TTS_VOICES = [
+    ("shimmer", "Shimmer"),
+    ("nova", "Nova"),
+    ("sage", "Sage"),
+    ("echo", "Echo"),
+    ("onyx", "Onyx"),
+    ("alloy", "Alloy"),
+    ("ash", "Ash"),
+    ("coral", "Coral"),
+    ("fable", "Fable"),
+]
+
 DEFAULT_BLOCKS = {
+    "story_gen": {
+        "enabled": False,
+        "mode": "ai",
+        "user_input": "",
+        "target_minutes": 5,
+        "age_range": "3-6",
+        "format": "fairy_tale",
+        "topic_queue": [],
+        "generated_story": "",
+        "generated_caption": "",
+    },
     "image_gen": {
         "enabled": False,
         "model": IMAGE_MODELS[0][0],
+        "add_watermark": True,
+        "allow_text": True,
     },
     "image_prompt": {
         "enabled": False,
@@ -51,6 +76,13 @@ DEFAULT_BLOCKS = {
         "user_description": "",
         "generated_prompt": "",
     },
+    "tts_gen": {
+        "enabled": False,
+        "model": "tts-1-hd",
+        "voice": "shimmer",
+        "speed": 0.85,
+        "response_format": "mp3",
+    },
     "post_gen": {
         "enabled": False,
         "mode": "ai",
@@ -60,11 +92,30 @@ DEFAULT_BLOCKS = {
         "bold_headings": True,
         "use_emoji": True,
         "comments_enabled": False,
+        "topic_queue": [],
     },
     "schedule": {
         "enabled": False,
         "frequency": "daily",
         "times": [],
+        "per_slot_prompts": False,
+        "slot_prompts": {},
+    },
+    "news_rss": {
+        "enabled": False,
+        "feeds": [],
+        "sites": [],
+        "mode": "on_new",
+        "poll_interval_minutes": 5,
+        "max_age_hours": 24,
+        "max_posts_per_hour": 3,
+        "publish_from_msk": "09:00",
+        "publish_until_msk": "22:00",
+        "niche": "",
+        "topic_brief": "",
+        "include_keywords": [],
+        "exclude_keywords": [],
+        "keywords_source": "",
     },
 }
 

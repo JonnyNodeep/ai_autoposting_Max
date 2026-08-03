@@ -32,7 +32,7 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
             user_id=subscription.user_id,
             tier=subscription.tier.value,
             status=subscription.status.value,
-            channels_limit=subscription.tier.channels_limit,
+            channels_limit=subscription.channels_limit,
             expires_at=subscription.expires_at,
         )
         self._session.add(model)
@@ -47,7 +47,7 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
             .values(
                 tier=subscription.tier.value,
                 status=subscription.status.value,
-                channels_limit=subscription.tier.channels_limit,
+                channels_limit=subscription.channels_limit,
                 expires_at=subscription.expires_at,
             )
         )

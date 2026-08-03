@@ -57,6 +57,55 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
             return True
 
         await fsm.set_block_data(max_user_id, "image_gen", {"model": model_id})
+        await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
+
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "🖼 *Генерация изображений*\n\n"
+                "Добавлять водяной знак (slug канала) на картинку?\n\n"
+                "Если в пайплайне включено видео — watermark всё равно "
+                "пойдёт только на видео, без двойного slug."
+            ),
+            attachments=[InlineKeyboardBuilder.ai_image_watermark_toggle()],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:image_gen:watermark:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        add_wm = value == "yes"
+        await fsm.set_block_data(max_user_id, "image_gen", {"add_watermark": add_wm})
+        await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
+
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "🖼 *Генерация изображений*\n\n"
+                "Разрешить текст на картинке (буквы, надписи, логотипы в кадре)?\n\n"
+                f"Водяной знак: {'вкл' if add_wm else 'выкл'}."
+            ),
+            attachments=[InlineKeyboardBuilder.ai_image_text_toggle()],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:image_gen:text:"):
+        value = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        allow_text = value == "yes"
+        await fsm.set_block_data(max_user_id, "image_gen", {"allow_text": allow_text})
         state = await fsm.get_state(max_user_id)
 
         await sync_active_pipeline(session, state)
@@ -82,7 +131,9 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         mode_labels = {
             "ai": "AI",
             "fixed": "Готовый промпт",
+            "from_topic": "Картинка по теме поста",
             "from_post": "Картинка по тексту поста",
+            "from_news": "Фото из новости → AI",
         }
         await max_client.send_message_to_user(
             user_id=max_user_id,
@@ -107,11 +158,16 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
 
         hint = (
-            "Для «картинки по тексту поста» обычно стоит включить "
+            "Для «картинки по теме/тексту поста» обычно стоит включить "
             "(стиль канала из анализа картинок)."
-            if mode == "from_post"
-            else "Для готового/AI промпта (открытки) обычно лучше выключить, "
-            "чтобы не ломать заданный промпт."
+            if mode in ("from_post", "from_topic")
+            else (
+                "Для «фото из новости» стиль влияет только на AI-fallback, "
+                "когда у новости нет своего фото."
+                if mode == "from_news"
+                else "Для готового/AI промпта (открытки) обычно лучше выключить, "
+                "чтобы не ломать заданный промпт."
+            )
         )
         await max_client.send_message_to_user(
             user_id=max_user_id,
@@ -138,12 +194,17 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         state = await fsm.get_state(max_user_id)
         mode = state.get("blocks", {}).get("image_prompt", {}).get("mode", "ai")
 
-        if mode == "from_post":
+        if mode in ("from_post", "from_topic"):
+            instruction = (
+                "Сгенерируй картинку по этой теме"
+                if mode == "from_topic"
+                else "Сгенерируй картинку для этого поста"
+            )
             await fsm.set_block_data(
                 max_user_id,
                 "image_prompt",
                 {
-                    "instruction": "Сгенерируй картинку для этого поста",
+                    "instruction": instruction,
                     "generated_prompt": "",
                     "user_description": "",
                 },
@@ -161,14 +222,63 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
             hint = (
                 "Текст/бриф поста уже есть — можно запускать тест."
                 if post_ready
-                else "Сначала настрой блок «📋 Генерация поста» — его текст станет основой картинки."
+                else (
+                    "Если включено «🎙 Аудио» — картинка возьмётся из темы/caption выпуска.\n"
+                    "Иначе настрой «📋 Пост» или бриф аудио."
+                )
+            )
+            if mode == "from_topic":
+                title = "🖼 *Картинка по теме поста*"
+                body = (
+                    "Промпт соберётся из короткой темы выпуска "
+                    "(очередь тем / approved topic / заголовок поста)."
+                )
+            else:
+                title = "📝 *Картинка по тексту поста*"
+                body = "Промпт соберётся из полного текста поста (или caption аудио)."
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    f"{title}\n\n"
+                    f"{body}\n"
+                    f"Визуальный стиль: {'вкл' if use_vs else 'выкл'}.\n\n"
+                    f"{hint}"
+                ),
+                fmt="markdown",
+            )
+            await sync_active_pipeline(session, state)
+            await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
+            return True
+
+        if mode == "from_news":
+            await fsm.set_block_data(
+                max_user_id,
+                "image_prompt",
+                {
+                    "instruction": "",
+                    "generated_prompt": "",
+                    "user_description": "",
+                },
+            )
+            img_gen = state.get("blocks", {}).get("image_gen", {})
+            if not img_gen.get("enabled"):
+                await fsm.toggle_block(max_user_id, "image_gen")
+
+            state = await fsm.get_state(max_user_id)
+            rss_on = bool((state.get("blocks", {}).get("news_rss") or {}).get("enabled"))
+            hint = (
+                "RSS включён — при публикации возьмём фото новости, "
+                "если его нет — сгенерируем по заголовку/сути."
+                if rss_on
+                else "Включи блок «RSS / сайты», иначе при запуске не будет news_item."
             )
             await max_client.send_message_to_user(
                 user_id=max_user_id,
                 text=(
-                    "🖼 *Картинка по тексту поста*\n\n"
-                    "Промпт для изображения будет собран из текста поста.\n"
-                    f"Визуальный стиль: {'вкл' if use_vs else 'выкл'}.\n\n"
+                    "📰 *Фото из новости → AI*\n\n"
+                    "Сначала фото источника (без watermark).\n"
+                    "Если фото нет — AI по фактам новости "
+                    f"({'со стилем канала' if use_vs else 'без стиля канала'}).\n\n"
                     f"{hint}"
                 ),
                 fmt="markdown",
@@ -296,10 +406,10 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         state = await fsm.get_state(max_user_id)
         if state:
             block = state.get("blocks", {}).get("image_prompt", {})
-            # from_post needs no generated_prompt — keep enabled
+            # from_post / from_topic / from_news need no generated_prompt — keep enabled
             if (
                 block.get("enabled")
-                and block.get("mode") != "from_post"
+                and block.get("mode") not in ("from_post", "from_topic", "from_news")
                 and not block.get("generated_prompt")
             ):
                 await fsm.toggle_block(max_user_id, "image_prompt")

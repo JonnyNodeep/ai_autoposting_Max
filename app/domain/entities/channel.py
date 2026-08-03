@@ -21,3 +21,5 @@ class Channel:
     is_active: bool = True
     is_setup_complete: bool = False
     channel_link: str | None = None
+    telegram_chat_id: int | None = None
+    telegram_link: str | None = None

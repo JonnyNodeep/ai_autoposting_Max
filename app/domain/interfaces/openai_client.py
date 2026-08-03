@@ -13,3 +13,14 @@ class OpenAIClient(ABC):
 
     @abstractmethod
     async def search_web(self, query: str) -> str: ...
+
+    @abstractmethod
+    async def generate_speech(
+        self,
+        text: str,
+        *,
+        model: str | None = None,
+        voice: str = "shimmer",
+        speed: float = 0.85,
+        response_format: str = "mp3",
+    ) -> str: ...

@@ -1,5 +1,9 @@
 from loguru import logger
 
+from app.application.auth.admin_access import (
+    display_channels_limit,
+    format_channels_quota,
+)
 from app.application.auth.register_user import RegisterUserUseCase
 from app.bot.dispatcher import UpdateDispatcher, UpdateType
 from app.bot.keyboards.builder import InlineKeyboardBuilder
@@ -46,7 +50,7 @@ def register_start_handlers(dispatcher: UpdateDispatcher) -> None:
             subscription = await subscription_repo.get_active_by_user(user.id)
             tier_name = subscription.tier.value if subscription else "solo"
             channels_count = await channel_repo.count_by_owner(user.id)
-            channels_limit = subscription.tier.channels_limit if subscription else 0
+            channels_limit = display_channels_limit(max_user_id, subscription)
 
             await max_client.send_message_to_user(
                 user_id=max_user_id,
@@ -55,7 +59,7 @@ def register_start_handlers(dispatcher: UpdateDispatcher) -> None:
                     f"Я Автопостинг Макс — твой AI-редактор для каналов MAX.\n\n"
                     f"Твой user\\_id: `{max_user_id}`\n"
                     f"Твой тариф: *{tier_name.upper()}*\n"
-                    f"Каналы: {channels_count} из {channels_limit}\n\n"
+                    f"Каналы: {format_channels_quota(channels_count, channels_limit)}\n\n"
                     f"Выбери действие:"
                 ),
                 attachments=[InlineKeyboardBuilder.main_menu(max_user_id, channels_count, channels_limit)],
@@ -85,13 +89,16 @@ def register_start_handlers(dispatcher: UpdateDispatcher) -> None:
 
             channels_count = await channel_repo.count_by_owner(user_id) if user_id else 0
             subscription = await subscription_repo.get_active_by_user(user_id) if user_id else None
-            channels_limit = subscription.channels_limit if subscription else 0
+            channels_limit = display_channels_limit(max_user_id, subscription)
 
             try:
                 if callback_data == "main_menu":
                     menu_text = "Выбери действие:"
-                    if channels_limit > 0:
-                        menu_text = f"Каналы: {channels_count} из {channels_limit}\n\nВыбери действие:"
+                    if channels_limit is None or channels_limit > 0:
+                        menu_text = (
+                            f"Каналы: {format_channels_quota(channels_count, channels_limit)}"
+                            f"\n\nВыбери действие:"
+                        )
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
                         text=menu_text,

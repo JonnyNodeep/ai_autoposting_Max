@@ -41,10 +41,10 @@ async def test_claim_text_input_clears_other_waits_and_reviews():
 
 
 @pytest.mark.asyncio
-async def test_clear_text_inputs_wipes_all():
+async def test_claim_text_input_clears_schedule_slot_prompt_wait():
     redis = FakeRedis()
-    uid = 1
-    redis.data[f"ai_post_gen_wait:{uid}"] = "ai"
-    redis.data[f"ai_schedule_custom_time:{uid}"] = "1"
-    await clear_text_inputs(redis, uid)
-    assert redis.data == {}
+    uid = 7
+    redis.data[f"ai_schedule_slot_prompt_wait:{uid}"] = "1"
+    await claim_text_input(redis, uid, "post_gen", "ai", ttl=300)
+    assert f"ai_schedule_slot_prompt_wait:{uid}" not in redis.data
+    assert redis.data.get(f"ai_post_gen_wait:{uid}") == "ai"

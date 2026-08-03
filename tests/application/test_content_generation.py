@@ -97,6 +97,28 @@ async def test_generate_logo(sample_channel):
     assert url == "https://example.com/logo.png"
 
 
+@pytest.mark.asyncio
+async def test_generate_logo_deletes_local_file_after_upload(sample_channel, tmp_path):
+    from pathlib import Path
+
+    local = tmp_path / "logo_xyz.png"
+    local.write_bytes(b"png")
+
+    repo = MockChannelRepo(sample_channel)
+    mock_openai = AsyncMock()
+    mock_openai.generate_image.return_value = str(local)
+
+    mock_max = AsyncMock()
+    mock_max.upload_file.return_value = "max-logo-token"
+
+    uc = GenerateLogoUseCase(repo, mock_openai, mock_max)
+    token = await uc.execute(1)
+
+    assert token == "max-logo-token"
+    mock_max.upload_file.assert_awaited_once_with(str(local), "image")
+    assert not Path(local).exists()
+
+
 def test_style_prompt():
     system, user = ContentPrompts.analyze_style(
         topic="tech",

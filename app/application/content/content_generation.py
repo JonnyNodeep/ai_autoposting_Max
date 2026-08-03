@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from loguru import logger
 
@@ -109,6 +110,10 @@ class GenerateLogoUseCase:
         elif self._max_client:
             token = await self._max_client.upload_file(result, "image")
             channel.logo_token = token
+            try:
+                Path(result).unlink(missing_ok=True)
+            except Exception:
+                logger.warning(f"Failed to cleanup logo file={result}")
         else:
             channel.logo_token = result
 

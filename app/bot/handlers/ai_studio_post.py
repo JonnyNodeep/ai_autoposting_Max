@@ -2,7 +2,7 @@ import json
 
 from loguru import logger
 
-from app.application.pipeline.generate_post import generate_post_text
+from app.application.pipeline.generate_post import TopicDedupExhausted, generate_post_text
 from app.application.pipeline.recent_topics import fetch_recent_post_topics
 from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
@@ -36,8 +36,12 @@ async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
             "📋 *Генерация поста — AI*\n\n"
             "Опиши *бриф / правила* для постов канала.\n"
             "Бот будет писать *новый пост при каждом запуске* пайплайна.\n\n"
-            "Например: «каждый пост — отдельный нетривиальный ПП-рецепт "
-            "с КБЖУ, ингредиентами и шагами приготовления»"
+            "Если канал на RSS/новостях — это не тема поста, а *как писать*: "
+            "тон, табу, длина, без желтухи и т.п. Факты возьмутся из новости.\n\n"
+            "Пример для городского канала: «дружелюбный тон, коротко, "
+            "акцент на хороших новостях, не копируй заголовок СМИ один в один»\n\n"
+            "Пример для обычного канала: «каждый пост — отдельный нетривиальный "
+            "ПП-рецепт с КБЖУ, ингредиентами и шагами приготовления»"
         )
     else:
         prompt_text = (
@@ -240,15 +244,27 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         post_block = (st or {}).get("blocks", {}).get("post_gen", {})
         chat_id = channel.max_chat_id if channel else None
         recent_topics = await fetch_recent_post_topics(max_client, chat_id)
-        generated_post = await generate_post_text(
-            openai_client,
-            review["input"],
-            ch_title,
-            bold_headings=bool(post_block.get("bold_headings", True)),
-            use_emoji=bool(post_block.get("use_emoji", True)),
-            comments_enabled=bool(post_block.get("comments_enabled", False)),
-            recent_topics=recent_topics,
-        )
+        try:
+            generated_post, _topic = await generate_post_text(
+                openai_client,
+                review["input"],
+                ch_title,
+                bold_headings=bool(post_block.get("bold_headings", True)),
+                use_emoji=bool(post_block.get("use_emoji", True)),
+                comments_enabled=bool(post_block.get("comments_enabled", False)),
+                recent_topics=recent_topics,
+            )
+        except TopicDedupExhausted as e:
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    f"Не смог найти новую тему для «{e.channel_title}» "
+                    f"после {e.attempts} попыток. Дубль не сохранён — "
+                    "попробуй перегенерировать позже или измени бриф."
+                ),
+                attachments=[InlineKeyboardBuilder.ai_post_gen_review("ai")],
+            )
+            return True
 
         review["post"] = generated_post
         await redis.setex(f"ai_post_gen_review:{max_user_id}", REVIEW_TTL, json.dumps(review, ensure_ascii=False))
@@ -347,15 +363,26 @@ async def handle_post_message(max_user_id: int, message_text: str, redis) -> boo
 
             chat_id = channel.max_chat_id if channel else None
             recent_topics = await fetch_recent_post_topics(max_client, chat_id)
-            generated_post = await generate_post_text(
-                openai_client,
-                message_text,
-                ch_title,
-                bold_headings=bool(post_block.get("bold_headings", True)),
-                use_emoji=bool(post_block.get("use_emoji", True)),
-                comments_enabled=bool(post_block.get("comments_enabled", False)),
-                recent_topics=recent_topics,
-            )
+            try:
+                generated_post, _topic = await generate_post_text(
+                    openai_client,
+                    message_text,
+                    ch_title,
+                    bold_headings=bool(post_block.get("bold_headings", True)),
+                    use_emoji=bool(post_block.get("use_emoji", True)),
+                    comments_enabled=bool(post_block.get("comments_enabled", False)),
+                    recent_topics=recent_topics,
+                )
+            except TopicDedupExhausted as e:
+                await max_client.send_message_to_user(
+                    user_id=max_user_id,
+                    text=(
+                        f"Не смог найти новую тему для «{e.channel_title}» "
+                        f"после {e.attempts} попыток. Дубль не сохранён — "
+                        "попробуй другой бриф или повтори позже."
+                    ),
+                )
+                return True
 
             review_data = json.dumps({
                 "mode": "ai",

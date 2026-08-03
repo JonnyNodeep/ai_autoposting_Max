@@ -1,3 +1,7 @@
+from app.application.auth.admin_access import (
+    display_channels_limit,
+    is_admin_max_user,
+)
 from datetime import datetime, UTC, timedelta
 
 from loguru import logger
@@ -60,15 +64,21 @@ def register_subscription_handlers(dispatcher: UpdateDispatcher) -> None:
                         return
 
                     tier_name = TIER_NAMES.get(sub.tier.value, sub.tier.value)
-                    expires = sub.expires_at.strftime("%d.%m.%Y") if sub.expires_at else "?"
+                    channels_limit = display_channels_limit(max_user_id, sub)
+                    if is_admin_max_user(max_user_id):
+                        expires = "без срока"
+                        tier_name = "Admin — безлимит"
+                    else:
+                        expires = sub.expires_at.strftime("%d.%m.%Y") if sub.expires_at else "?"
 
                     builder = InlineKeyboardBuilder()
-                    for t_key in ["solo", "creator", "studio"]:
-                        price = TIER_PRICES[t_key]
-                        if sub.tier.value == t_key:
-                            builder.row((f"✅ {price['label']} (текущий)", "none"))
-                        else:
-                            builder.row((f"⬆️ {price['label']}", f"subscription:buy:{t_key}"))
+                    if not is_admin_max_user(max_user_id):
+                        for t_key in ["solo", "creator", "studio"]:
+                            price = TIER_PRICES[t_key]
+                            if sub.tier.value == t_key:
+                                builder.row((f"✅ {price['label']} (текущий)", "none"))
+                            else:
+                                builder.row((f"⬆️ {price['label']}", f"subscription:buy:{t_key}"))
                     builder.row(("На главную", "main_menu"))
 
                     await max_client.send_message_to_user(
@@ -77,9 +87,13 @@ def register_subscription_handlers(dispatcher: UpdateDispatcher) -> None:
                             f"*Твоя подписка*\n\n"
                             f"Тариф: {tier_name}\n"
                             f"Статус: {sub.status.value}\n"
-                            f"Доступно каналов: {sub.channels_limit}\n"
+                            f"Доступно каналов: {'∞' if channels_limit is None else channels_limit}\n"
                             f"Действует до: {expires}\n\n"
-                            f"Выбери тариф для смены:"
+                            + (
+                                "Админский доступ без ограничений."
+                                if is_admin_max_user(max_user_id)
+                                else "Выбери тариф для смены:"
+                            )
                         ),
                         attachments=[builder.build()],
                         fmt="markdown",
@@ -87,6 +101,14 @@ def register_subscription_handlers(dispatcher: UpdateDispatcher) -> None:
 
                 elif callback_data.startswith("subscription:buy:"):
                     if not user_id:
+                        return
+
+                    if is_admin_max_user(max_user_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="У тебя админский безлимит — смена тарифа не нужна.",
+                            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+                        )
                         return
 
                     tier = callback_data.split(":")[2]

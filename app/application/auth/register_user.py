@@ -1,6 +1,8 @@
 from loguru import logger
 
+from app.application.auth.admin_access import ensure_admin_subscription, is_admin_max_user
 from app.bot.keyboards.builder import InlineKeyboardBuilder
+from app.config import settings
 from app.domain.entities.user import User
 from app.domain.entities.subscription import Subscription
 from app.domain.value_objects.subscription_tier import SubscriptionTier
@@ -8,8 +10,6 @@ from app.domain.value_objects.subscription_status import SubscriptionStatus
 from app.domain.interfaces.user_repository import UserRepository
 from app.domain.interfaces.subscription_repository import SubscriptionRepository
 from app.domain.interfaces.max_client import MaxAPIClient
-from app.domain.interfaces.openai_client import OpenAIClient
-from app.config import settings
 
 
 class RegisterUserUseCase:
@@ -27,6 +27,8 @@ class RegisterUserUseCase:
         existing = await self._user_repo.get_by_max_user_id(max_user_id)
         if existing:
             await self._user_repo.set_active(existing.id, True)
+            if is_admin_max_user(max_user_id) and existing.id is not None:
+                await ensure_admin_subscription(self._subscription_repo, existing.id)
             return existing
 
         user = await self._user_repo.create(
@@ -38,9 +40,17 @@ class RegisterUserUseCase:
             )
         )
 
-        await self._subscription_repo.create(
-            Subscription(user_id=user.id, tier=SubscriptionTier.SOLO, status=SubscriptionStatus.TRIAL)
-        )
+        if is_admin_max_user(max_user_id) and user.id is not None:
+            await ensure_admin_subscription(self._subscription_repo, user.id)
+        else:
+            await self._subscription_repo.create(
+                Subscription(
+                    user_id=user.id,
+                    tier=SubscriptionTier.SOLO,
+                    status=SubscriptionStatus.TRIAL,
+                    channels_limit=SubscriptionTier.SOLO.channels_limit,
+                )
+            )
 
         logger.info(f"New user registered: max_user_id={max_user_id} internal_id={user.id}")
 

@@ -28,6 +28,7 @@ COPY app/ /app/app/
 COPY alembic.ini /app/
 COPY alembic/ /app/alembic/
 COPY tests/ /app/tests/
+COPY scripts/ /app/scripts/
 COPY pyproject.toml /app/
 
 EXPOSE 8000

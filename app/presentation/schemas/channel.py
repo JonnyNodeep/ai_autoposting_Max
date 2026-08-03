@@ -15,6 +15,8 @@ class ChannelResponse(BaseModel):
     content_frequency: str | None = None
     is_active: bool = True
     is_setup_complete: bool = False
+    telegram_chat_id: int | None = None
+    telegram_link: str | None = None
 
 
 class ChannelCreateRequest(BaseModel):
@@ -26,6 +28,15 @@ class ChannelUpdateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     topic: str | None = Field(default=None, max_length=512)
     content_frequency: str | None = Field(default=None, max_length=64)
+    telegram_chat_id: int | None = Field(
+        default=None,
+        description="Telegram channel chat_id for dual-publish (None = Max only)",
+    )
+    telegram_link: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Public Telegram link https://t.me/... for CTA in TG posts",
+    )
 
 
 class SamplePostsResponse(BaseModel):

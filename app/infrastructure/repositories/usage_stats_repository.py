@@ -9,6 +9,7 @@ from app.infrastructure.models.channel import ChannelModel
 from app.infrastructure.models.content_post import ContentPostModel
 from app.infrastructure.models.generation_log import GenerationLogModel
 from app.infrastructure.models.payment import PaymentModel
+from app.infrastructure.models.channel_member_event import ChannelMemberEventModel
 from app.domain.value_objects.subscription_status import SubscriptionStatus
 
 
@@ -78,7 +79,103 @@ class UsageStatsRepository:
             "total_cost": round(total_cost or 0, 4),
             "total_tokens": total_tokens or 0,
             "total_operations": total_ops,
+            "source": "generation_logs",
         }
+
+    async def record_member_event(
+        self,
+        channel_id: int,
+        max_chat_id: int,
+        event_type: str,
+        max_user_id: int | None = None,
+    ) -> None:
+        self._session.add(
+            ChannelMemberEventModel(
+                channel_id=channel_id,
+                max_chat_id=max_chat_id,
+                event_type=event_type,
+                max_user_id=max_user_id,
+            )
+        )
+        await self._session.flush()
+
+    async def get_member_event_counts(self, days: int) -> dict:
+        since = datetime.now(UTC) - timedelta(days=days)
+        joined = await self._count(
+            ChannelMemberEventModel,
+            ChannelMemberEventModel.event_type == "joined",
+            ChannelMemberEventModel.created_at >= since,
+        )
+        left = await self._count(
+            ChannelMemberEventModel,
+            ChannelMemberEventModel.event_type == "left",
+            ChannelMemberEventModel.created_at >= since,
+        )
+        return {
+            "days": days,
+            "joined": joined,
+            "left": left,
+            "net": joined - left,
+        }
+
+    async def get_member_event_counts_by_channel(self, days: int, limit: int = 10) -> list[dict]:
+        since = datetime.now(UTC) - timedelta(days=days)
+        joined_sq = (
+            select(
+                ChannelMemberEventModel.channel_id.label("channel_id"),
+                func.count().label("joined"),
+            )
+            .where(
+                ChannelMemberEventModel.event_type == "joined",
+                ChannelMemberEventModel.created_at >= since,
+            )
+            .group_by(ChannelMemberEventModel.channel_id)
+            .subquery()
+        )
+        left_sq = (
+            select(
+                ChannelMemberEventModel.channel_id.label("channel_id"),
+                func.count().label("left"),
+            )
+            .where(
+                ChannelMemberEventModel.event_type == "left",
+                ChannelMemberEventModel.created_at >= since,
+            )
+            .group_by(ChannelMemberEventModel.channel_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                ChannelModel.id,
+                ChannelModel.title,
+                func.coalesce(joined_sq.c.joined, 0).label("joined"),
+                func.coalesce(left_sq.c.left, 0).label("left"),
+            )
+            .outerjoin(joined_sq, ChannelModel.id == joined_sq.c.channel_id)
+            .outerjoin(left_sq, ChannelModel.id == left_sq.c.channel_id)
+            .where(ChannelModel.is_active == True)
+            .order_by(
+                (func.coalesce(joined_sq.c.joined, 0) - func.coalesce(left_sq.c.left, 0)).desc()
+            )
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        rows = []
+        for channel_id, title, joined, left in result.all():
+            joined_i = int(joined or 0)
+            left_i = int(left or 0)
+            if joined_i == 0 and left_i == 0:
+                continue
+            rows.append(
+                {
+                    "channel_id": channel_id,
+                    "title": title,
+                    "joined": joined_i,
+                    "left": left_i,
+                    "net": joined_i - left_i,
+                }
+            )
+        return rows
 
     async def _count(self, model, *filters) -> int:
         stmt = select(func.count()).select_from(model)

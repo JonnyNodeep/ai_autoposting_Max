@@ -50,9 +50,11 @@ class OpenAISettings(BaseSettings):
     model_config = {"extra": "ignore"}
 
     api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    admin_api_key: str = Field(default="", alias="OPENAI_ADMIN_API_KEY")
     text_model: str = Field(default="gpt-5.5-mini", alias="OPENAI_TEXT_MODEL")
     image_model: str = Field(default="imagen-1.5", alias="OPENAI_IMAGE_MODEL")
     search_model: str = Field(default="gpt-4o-mini-search-preview", alias="OPENAI_SEARCH_MODEL")
+    tts_model: str = Field(default="tts-1-hd", alias="OPENAI_TTS_MODEL")
 
 
 class YooKassaSettings(BaseSettings):
@@ -77,6 +79,12 @@ class VidGoSettings(BaseSettings):
     webhook_token: str = Field(default="", alias="VIDGO_WEBHOOK_TOKEN")
 
 
+class TelegramSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    token: str = Field(default="", alias="TELEGRAM_TOKEN")
+
+
 class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     postgres: PostgresSettings = PostgresSettings()
@@ -86,6 +94,7 @@ class Settings(BaseSettings):
     yookassa: YooKassaSettings = YooKassaSettings()
     admin: AdminSettings = AdminSettings()
     vidgo: VidGoSettings = VidGoSettings()
+    telegram: TelegramSettings = TelegramSettings()
 
 
 @lru_cache

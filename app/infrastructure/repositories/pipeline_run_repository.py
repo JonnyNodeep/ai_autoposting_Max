@@ -16,13 +16,45 @@ class SQLAPipelineRunRepository:
         return self._to_entity(model) if model else None
 
     async def get_active_by_channel(self, channel_id: int) -> PipelineRun | None:
-        stmt = select(PipelineRunModel).where(
-            PipelineRunModel.channel_id == channel_id,
-            PipelineRunModel.status == PipelineStatus.ACTIVE.value,
+        """Latest active run for channel (safe if duplicates exist)."""
+        stmt = (
+            select(PipelineRunModel)
+            .where(
+                PipelineRunModel.channel_id == channel_id,
+                PipelineRunModel.status == PipelineStatus.ACTIVE.value,
+            )
+            .order_by(PipelineRunModel.id.desc())
+            .limit(1)
         )
         result = await self._session.execute(stmt)
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
+
+    async def list_active_by_channel(self, channel_id: int) -> list[PipelineRun]:
+        stmt = (
+            select(PipelineRunModel)
+            .where(
+                PipelineRunModel.channel_id == channel_id,
+                PipelineRunModel.status == PipelineStatus.ACTIVE.value,
+            )
+            .order_by(PipelineRunModel.id.desc())
+        )
+        result = await self._session.execute(stmt)
+        return [self._to_entity(m) for m in result.scalars().all()]
+
+    async def stop_all_active_by_channel(self, channel_id: int) -> list[int]:
+        """Stop every active run for channel. Returns stopped run ids."""
+        runs = await self.list_active_by_channel(channel_id)
+        ids = [r.id for r in runs if r.id is not None]
+        if not ids:
+            return []
+        await self._session.execute(
+            update(PipelineRunModel)
+            .where(PipelineRunModel.id.in_(ids))
+            .values(status=PipelineStatus.STOPPED.value)
+        )
+        await self._session.flush()
+        return ids
 
     async def get_all_active(self) -> list[PipelineRun]:
         stmt = select(PipelineRunModel).where(

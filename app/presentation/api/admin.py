@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.infrastructure.database.session import get_session
 from app.infrastructure.repositories.usage_stats_repository import UsageStatsRepository
+from app.infrastructure.services.openai_costs_client import OpenAICostsClient
 from app.presentation.api.dependencies import require_api_token
 
 admin_router = APIRouter(
@@ -56,7 +57,23 @@ async def get_subscriptions(limit: int = 50) -> list[dict]:
 
 
 @admin_router.get("/costs")
-async def get_costs(days: int = 30) -> dict:
+async def get_costs(days: int = Query(default=30, ge=1, le=180)) -> dict:
+    costs_client = OpenAICostsClient()
+    if costs_client.configured:
+        try:
+            return await costs_client.get_costs(days)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"OpenAI Costs API error: {exc}") from exc
+
     async for session in get_session():
         repo = UsageStatsRepository(session)
         return await repo.get_openai_costs(days)
+
+
+@admin_router.get("/channels/members")
+async def get_channel_member_stats(days: int = Query(default=1, ge=1, le=180)) -> dict:
+    async for session in get_session():
+        repo = UsageStatsRepository(session)
+        totals = await repo.get_member_event_counts(days)
+        by_channel = await repo.get_member_event_counts_by_channel(days, limit=50)
+        return {**totals, "by_channel": by_channel}

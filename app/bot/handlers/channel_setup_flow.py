@@ -2,6 +2,10 @@ import json
 
 from loguru import logger
 
+from app.application.auth.admin_access import (
+    display_channels_limit,
+    format_channels_quota,
+)
 from app.application.auth.register_user import RegisterUserUseCase
 from app.application.channels.channel_setup import LoadSamplePostsUseCase, UpdateChannelSetupUseCase
 from app.application.content.content_generation import (
@@ -10,6 +14,12 @@ from app.application.content.content_generation import (
     GenerateLogoUseCase,
 )
 from app.bot.dispatcher import UpdateDispatcher, UpdateType
+from app.bot.handlers.telegram_bind_ui import (
+    handle_telegram_chat_id_message,
+    handle_telegram_link_message,
+    offer_telegram_mirror,
+    start_telegram_chat_wait,
+)
 from app.bot.handlers.time_utils import parse_time_hh_mm
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.channel_setup import ChannelSetupFSM, SetupStep
@@ -100,8 +110,36 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
                 if await redis.get(f"ai_post_gen_wait:{max_user_id}"):
                     return
+                if await redis.get(f"ai_topic_queue_wait:{max_user_id}"):
+                    return
                 if await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
                     return
+
+                async def _setup_done() -> None:
+                    await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+
+                if await handle_telegram_link_message(
+                    max_user_id,
+                    message_text,
+                    channel_repo=channel_repo,
+                    max_client=max_client,
+                    session=session,
+                    on_setup_done=_setup_done,
+                ):
+                    await max_client.close()
+                    return
+
+                if await handle_telegram_chat_id_message(
+                    max_user_id,
+                    message_text,
+                    channel_repo=channel_repo,
+                    max_client=max_client,
+                    session=session,
+                    on_setup_done=_setup_done,
+                ):
+                    await max_client.close()
+                    return
+
                 style_prompt_data = await redis.get(f"style_prompt:{max_user_id}")
                 if style_prompt_data and message_text:
                     data = json.loads(style_prompt_data)
@@ -151,7 +189,9 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         user_id=max_user_id,
                         text="📄 Формат поста запомнен!",
                     )
-                    await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+                    await offer_telegram_after_setup(
+                        max_user_id, ch_id, fsm, channel_repo, max_client, session
+                    )
                     await max_client.close()
                     return
 
@@ -237,7 +277,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
             subscription = await subscription_repo.get_active_by_user(user.id)
             tier_name = subscription.tier.value if subscription else "solo"
             channels_count = await channel_repo.count_by_owner(user.id)
-            channels_limit = subscription.tier.channels_limit if subscription else 0
+            channels_limit = display_channels_limit(max_user_id, subscription)
 
             await max_client.send_message_to_user(
                 user_id=max_user_id,
@@ -246,7 +286,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     f"Я Автопостинг Макс — твой AI-редактор для каналов MAX.\n\n"
                     f"Твой user\\_id: `{max_user_id}`\n"
                     f"Твой тариф: *{tier_name.upper()}*\n"
-                    f"Каналы: {channels_count} из {channels_limit}\n\n"
+                    f"Каналы: {format_channels_quota(channels_count, channels_limit)}\n\n"
                     f"Выбери действие:"
                 ),
                 attachments=[InlineKeyboardBuilder.main_menu(max_user_id, channels_count, channels_limit)],
@@ -280,7 +320,7 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
 
             channels_count = await channel_repo.count_by_owner(user_id) if user_id else 0
             subscription = await subscription_repo.get_active_by_user(user_id) if user_id else None
-            channels_limit = subscription.channels_limit if subscription else 0
+            channels_limit = display_channels_limit(max_user_id, subscription)
 
             async def _owns_channel(channel_id: int) -> bool:
                 if not user_id:
@@ -426,7 +466,9 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                             attachments=[builder.build()],
                         )
                     else:
-                        await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+                        await offer_telegram_after_setup(
+                            max_user_id, None, fsm, channel_repo, max_client, session
+                        )
 
                 elif callback_data == "setup:visual:no":
                     state = await fsm.get_state(max_user_id)
@@ -443,7 +485,9 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                             attachments=[builder.build()],
                         )
                     else:
-                        await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+                        await offer_telegram_after_setup(
+                            max_user_id, None, fsm, channel_repo, max_client, session
+                        )
 
                 elif callback_data == "setup:style:prompt":
                     state = await fsm.get_state(max_user_id)
@@ -594,8 +638,39 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                 elif callback_data == "setup:refpost:no":
                     redis_local = await get_redis()
                     refpost_ch_id = await redis_local.get(f"setup_refpost:{max_user_id}")
+                    ch_id = int(refpost_ch_id) if refpost_ch_id else None
                     if refpost_ch_id:
                         await redis_local.delete(f"setup_refpost:{max_user_id}")
+                    if not ch_id:
+                        state = await fsm.get_state(max_user_id)
+                        ch_id = state["channel_id"] if state else None
+                    await offer_telegram_after_setup(
+                        max_user_id, ch_id, fsm, channel_repo, max_client, session
+                    )
+
+                elif callback_data.startswith("setup:tg:bind:"):
+                    ch_id = int(callback_data.split(":")[3])
+                    if not await _owns_channel(ch_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Нет доступа к этому каналу.",
+                        )
+                        return
+                    await start_telegram_chat_wait(
+                        max_user_id, ch_id, max_client, source="setup"
+                    )
+
+                elif callback_data.startswith("setup:tg:skip_link:"):
+                    ch_id = int(callback_data.split(":")[3])
+                    redis_local = await get_redis()
+                    await redis_local.delete(f"tg_bind_link:{max_user_id}")
+                    await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+
+                elif callback_data.startswith("setup:tg:skip:"):
+                    ch_id = int(callback_data.split(":")[3])
+                    redis_local = await get_redis()
+                    await redis_local.delete(f"tg_bind_chat:{max_user_id}")
+                    await redis_local.delete(f"tg_bind_link:{max_user_id}")
                     await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
 
                 elif callback_data == "setup:refpost:yes":
@@ -716,6 +791,21 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
 
             await max_client.close()
             await session.commit()
+
+
+async def offer_telegram_after_setup(
+    max_user_id: int,
+    channel_id: int | None,
+    fsm: ChannelSetupFSM,
+    channel_repo: SQLAlchemyChannelRepository,
+    max_client: MaxAPIHTTPClient,
+    session,
+) -> None:
+    """Ask to bind Telegram before completing setup; skippable."""
+    if not channel_id:
+        await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
+        return
+    await offer_telegram_mirror(max_user_id, channel_id, max_client, source="setup")
 
 
 async def finish_setup(

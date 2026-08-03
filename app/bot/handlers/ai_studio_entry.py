@@ -13,6 +13,7 @@ BLOCK_LABELS = {
     "video_gen": "Генерация видео",
     "post_gen": "Генерация поста",
     "schedule": "Расписание публикаций",
+    "news_rss": "RSS-новости",
 }
 
 REDIS_TTL = 300
@@ -179,17 +180,69 @@ async def handle_entry_callback(
             times_str = ", ".join(times_msk) + " МСК" if times_msk else "не задано"
             lines.append(f"⏱ *Частота:* {freq_names.get(sched['frequency'], sched['frequency'])}")
             lines.append(f"⏱ *Время:* {times_str}")
+            if sched.get("per_slot_prompts"):
+                slot_prompts = sched.get("slot_prompts") or {}
+                slot_lines = []
+                for t in sched.get("times", []):
+                    parts = t.split(":")
+                    h = (int(parts[0]) + 3) % 24
+                    m = parts[1] if len(parts) > 1 else "00"
+                    label = f"{h:02d}:{m}"
+                    if str(slot_prompts.get(t) or "").strip():
+                        slot_lines.append(f"{label} — свой")
+                    else:
+                        slot_lines.append(f"{label} — общий")
+                if slot_lines:
+                    lines.append(f"⏱ *Промпты слотов:* {', '.join(slot_lines)}")
+
+        rss = blocks.get("news_rss") or {}
+        if rss.get("enabled"):
+            from app.application.pipeline.rss_monitor import (
+                NICHE_LABELS,
+                format_publish_window_label,
+            )
+
+            feeds = list(rss.get("feeds") or [])
+            niche = rss.get("niche") or ""
+            niche_label = NICHE_LABELS.get(niche, niche or "—")
+            inc = list(rss.get("include_keywords") or [])
+            exc = list(rss.get("exclude_keywords") or [])
+            lines.append(
+                f"📰 *RSS:* {len(feeds)} лент, опрос каждые "
+                f"{rss.get('poll_interval_minutes', 5)} мин"
+            )
+            lines.append(
+                f"📰 *Окно:* {format_publish_window_label(rss.get('publish_from_msk', '09:00'), rss.get('publish_until_msk', '22:00'))}"
+            )
+            lines.append(f"📰 *Тема фильтра:* {niche_label}")
+            lines.append(f"📰 *Слова:* +{len(inc)} / −{len(exc)}")
+            for u in feeds[:5]:
+                short = u if len(u) <= 60 else u[:57] + "…"
+                lines.append(f"📰 • {short}")
 
         lines.append("")
 
         img_gen = blocks.get("image_gen", {})
         if img_gen.get("enabled"):
             lines.append(f"🖼 *Модель:* {_model_name(img_gen.get('model', ''))}")
+            lines.append(
+                f"🖼 *Водяной знак:* "
+                f"{'Да' if img_gen.get('add_watermark', True) else 'Нет'}"
+            )
+            lines.append(
+                f"🖼 *Текст на картинке:* "
+                f"{'Да' if img_gen.get('allow_text', True) else 'Нет'}"
+            )
 
         img_prompt = blocks.get("image_prompt", {})
         if img_prompt.get("enabled"):
             mode = img_prompt.get("mode", "ai")
-            if mode == "from_post":
+            if mode == "from_topic":
+                lines.append("📝 *Режим:* Картинка по теме поста")
+                instruction = img_prompt.get("instruction") or "Сгенерируй картинку по этой теме"
+                ipreview = instruction[:200] + "…" if len(instruction) > 200 else instruction
+                lines.append(f"📝 *Инструкция:* {ipreview}")
+            elif mode == "from_post":
                 lines.append("📝 *Режим:* Картинка по тексту поста")
                 instruction = img_prompt.get("instruction") or "Сгенерируй картинку для этого поста"
                 ipreview = instruction[:200] + "…" if len(instruction) > 200 else instruction
@@ -201,7 +254,7 @@ async def handle_entry_callback(
                 lines.append(f"📝 *Режим:* {'AI' if mode == 'ai' else 'Готовый'}")
             use_vs = img_prompt.get("use_visual_style")
             if use_vs is None:
-                use_vs = mode == "from_post"
+                use_vs = mode in ("from_post", "from_topic")
             lines.append(f"📝 *Визуальный стиль:* {'Да' if use_vs else 'Нет'}")
 
         video = blocks.get("video_gen", {})
@@ -239,6 +292,8 @@ async def handle_entry_callback(
                 brief = post.get("user_input", "")
                 bpreview = brief[:200] + "…" if len(brief) > 200 else brief
                 lines.append(f"📋 *Бриф:* {bpreview}")
+                queue = list(post.get("topic_queue") or [])
+                lines.append(f"📚 *Очередь тем:* {len(queue)}")
             else:
                 post_text = post.get("generated_post", "")
                 ppreview = post_text[:200] + "…" if len(post_text) > 200 else post_text
@@ -318,7 +373,7 @@ async def _generate_post(
 ) -> str:
     from app.application.pipeline.generate_post import generate_post_text
 
-    return await generate_post_text(
+    text, _topic = await generate_post_text(
         openai_client,
         user_description,
         channel_title,
@@ -326,6 +381,7 @@ async def _generate_post(
         use_emoji=use_emoji,
         comments_enabled=comments_enabled,
     )
+    return text
 
 
 def _post_review_text(post_text: str) -> str:

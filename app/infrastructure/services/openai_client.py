@@ -114,6 +114,61 @@ class OpenAIService(OpenAIClient):
         logger.info(f"Web search completed for: {query[:80]}")
         return content
 
+    async def generate_speech(
+        self,
+        text: str,
+        *,
+        model: str | None = None,
+        voice: str = "shimmer",
+        speed: float = 0.85,
+        response_format: str = "mp3",
+    ) -> str:
+        from app.application.pipeline.tts_chunking import chunk_tts_text, concat_mp3_files
+
+        script = (text or "").strip()
+        if not script:
+            raise ValueError("Empty text for speech generation")
+
+        tts_model = (model or settings.openai.tts_model or "tts-1-hd").strip()
+        speed_val = max(0.25, min(4.0, float(speed)))
+        fmt = (response_format or "mp3").strip() or "mp3"
+        chunks = chunk_tts_text(script)
+        if not chunks:
+            raise ValueError("Empty text for speech generation")
+
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        part_paths: list[Path] = []
+        try:
+            for i, chunk in enumerate(chunks):
+                response = await self._client.audio.speech.create(
+                    model=tts_model,
+                    voice=voice,
+                    input=chunk,
+                    response_format=fmt,
+                    speed=speed_val,
+                )
+                part_path = UPLOAD_DIR / f"tts_part_{uuid.uuid4().hex[:12]}_{i}.{fmt}"
+                part_path.write_bytes(response.content)
+                part_paths.append(part_path)
+
+            out_path = UPLOAD_DIR / f"tts_{uuid.uuid4().hex[:12]}.{fmt}"
+            if len(part_paths) == 1:
+                part_paths[0].rename(out_path)
+                part_paths = []
+            else:
+                concat_mp3_files(part_paths, out_path)
+            logger.info(
+                f"TTS done model={tts_model} voice={voice} "
+                f"chunks={len(chunks)} path={out_path}"
+            )
+            return str(out_path)
+        finally:
+            for p in part_paths:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
 
 def _apply_watermark(filepath: str, slug: str) -> None:
     from PIL import Image, ImageDraw, ImageFont

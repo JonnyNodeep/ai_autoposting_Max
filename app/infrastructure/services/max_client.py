@@ -22,12 +22,26 @@ def _get_verify_path() -> str | bool:
     return True
 
 
+def _is_attachment_not_ready(response: httpx.Response) -> bool:
+    """MAX returns 400 while uploaded audio/video is still processing."""
+    body = (response.text or "").lower()
+    return (
+        "attachment.not.ready" in body
+        or "not.processed" in body
+        or "attachment.video.not.processed" in body
+    )
+
+
 def _is_retryable_max_error(exc: Exception) -> bool:
     if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        return status == 408 or status == 429 or status >= 500
+        if status == 408 or status == 429 or status >= 500:
+            return True
+        # Upload token can be returned before MAX finishes processing media.
+        if status == 400 and _is_attachment_not_ready(exc.response):
+            return True
     return False
 
 
@@ -46,9 +60,10 @@ class MaxAPIHTTPClient(MaxAPIClient):
         await self._client.aclose()
 
     @retry(
-        stop=stop_after_attempt(5),
+        stop=stop_after_attempt(8),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception(_is_retryable_max_error),
+        reraise=True,
     )
     async def _request(
         self,
@@ -62,7 +77,10 @@ class MaxAPIHTTPClient(MaxAPIClient):
             method=method, url=path, params=params, json=json
         )
         if response.status_code >= 400:
-            logger.error(f"MAX API {method} {path} status={response.status_code} body={response.text[:500]}")
+            logger.error(
+                f"MAX API {method} {path} status={response.status_code} "
+                f"body={response.text[:500]}"
+            )
         response.raise_for_status()
         return response.json()
 
@@ -191,6 +209,7 @@ class MaxAPIHTTPClient(MaxAPIClient):
         types = update_types or [
             "bot_added", "bot_started", "bot_stopped", "bot_removed",
             "message_created", "message_callback", "message_edited", "message_removed",
+            "user_added", "user_removed",
         ]
         body: dict[str, Any] = {"url": url, "update_types": types}
         if secret:

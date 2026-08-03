@@ -10,6 +10,7 @@ from app.infrastructure.models import (
     UserModel, ChannelModel, SubscriptionModel,
     ContentPlanModel, ContentTopicModel, ContentPostModel,
     PublishScheduleModel, PaymentModel, GenerationLogModel,
+    PipelineRunModel, RssSeenItemModel,
 )  # noqa: F401
 
 config = context.config

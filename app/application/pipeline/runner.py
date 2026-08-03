@@ -6,9 +6,40 @@ from loguru import logger
 
 from app.application.pipeline.blocks.registry import BlockRegistry, default_registry
 from app.application.pipeline.context import PipelineContext
-from app.application.pipeline.generate_post import generate_post_text
-from app.application.pipeline.normalize import normalize_blocks_config
-from app.application.pipeline.recent_topics import fetch_recent_post_topics
+from app.application.pipeline.generate_post import TopicDedupExhausted, generate_post_text
+from app.application.pipeline.normalize import normalize_blocks_config, resolve_post_brief
+from app.application.pipeline.recent_topics import (
+    fetch_recent_post_topics,
+    topic_from_post_text,
+)
+from app.application.pipeline.topic_queue import get_topic_queue_from_post_cfg, pop_topic
+
+
+def _style_profile_dict(channel: Any) -> dict[str, Any] | None:
+    if channel is None:
+        return None
+    style = getattr(channel, "style_profile", None)
+    if style is None:
+        return None
+    if isinstance(style, dict):
+        return style
+    to_dict = getattr(style, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _owner_max_user_id(ctx: PipelineContext) -> int | None:
+    if not isinstance(ctx.meta, dict):
+        return None
+    raw = ctx.meta.get("owner_max_user_id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 class PipelineRunner:
@@ -24,9 +55,33 @@ class PipelineRunner:
         )
         ctx.meta["skip_image_watermark"] = bool(video_enabled)
 
-        # Pre-seed post text so image_prompt mode=from_post can run before post_gen publishes.
-        if not (ctx.post_text or "").strip():
-            await self._preseed_post_text(ctx, v2)
+        story_enabled = any(
+            s.get("type") == "story_gen" and s.get("enabled") for s in v2["steps"]
+        )
+
+        # Shared topic queue lives on post_gen; story_gen consumes it at publish time.
+        for step in v2["steps"]:
+            if step.get("type") == "post_gen":
+                ctx.meta["shared_topic_queue"] = get_topic_queue_from_post_cfg(
+                    step.get("config") or {}
+                )
+                break
+        else:
+            ctx.meta.setdefault("shared_topic_queue", [])
+
+        # Pre-seed post text so image_prompt mode=from_post/from_topic can run before post_gen publishes.
+        # When story_gen is on, it fills caption + story_script in the main loop.
+        if not story_enabled and not (ctx.post_text or "").strip():
+            try:
+                await self._preseed_post_text(ctx, v2)
+            except TopicDedupExhausted as e:
+                logger.warning(
+                    f"Topic dedup exhausted channel={e.channel_title!r} "
+                    f"attempts={e.attempts} rejected={e.rejected_topics!r} "
+                    f"run_id={ctx.run_id}"
+                )
+                await self._alert_topic_dedup(ctx, e)
+                return ctx
 
         for step in v2["steps"]:
             block_type = step["type"]
@@ -49,9 +104,97 @@ class PipelineRunner:
                 )
                 raise
 
+            # Keep in-memory post_gen queue in sync after story consumes a topic.
+            if (
+                block_type == "story_gen"
+                and isinstance(ctx.meta, dict)
+                and ctx.meta.get("topic_queue_popped")
+                and ctx.meta.get("topic_queue_block") == "post_gen"
+            ):
+                remaining = list(ctx.meta.get("topic_queue_remaining") or [])
+                ctx.meta["shared_topic_queue"] = remaining
+                for s in v2["steps"]:
+                    if s.get("type") != "post_gen":
+                        continue
+                    cfg = dict(s.get("config") or {})
+                    cfg["topic_queue"] = remaining
+                    s["config"] = cfg
+                    break
+
         return ctx
 
+    async def _alert_topic_dedup(
+        self, ctx: PipelineContext, exc: TopicDedupExhausted
+    ) -> None:
+        owner_id = _owner_max_user_id(ctx)
+        if not owner_id or ctx.max_client is None:
+            return
+        text = (
+            f"Не смог найти новую тему для «{exc.channel_title}» "
+            f"после {exc.attempts} попыток. Слот пропущен, дубль не опубликован."
+        )
+        try:
+            await ctx.max_client.send_message_to_user(user_id=owner_id, text=text)
+        except Exception as e:
+            logger.warning(
+                f"Topic dedup alert failed owner={owner_id} run_id={ctx.run_id}: {e}"
+            )
+
+    async def _alert_topic_queue_exhausted(self, ctx: PipelineContext) -> None:
+        owner_id = _owner_max_user_id(ctx)
+        if not owner_id or ctx.max_client is None:
+            return
+        title = (ctx.channel_title or "").strip() or "канал"
+        text = (
+            f"Темы для «{title}» закончились. "
+            f"Последнюю уже использовал, дальше иду по общему брифу."
+        )
+        try:
+            await ctx.max_client.send_message_to_user(user_id=owner_id, text=text)
+        except Exception as e:
+            logger.warning(
+                f"Topic queue exhausted alert failed owner={owner_id} "
+                f"run_id={ctx.run_id}: {e}"
+            )
+
     async def _preseed_post_text(self, ctx: PipelineContext, v2: dict[str, Any]) -> None:
+        news_item = ctx.meta.get("news_item") if isinstance(ctx.meta, dict) else None
+        if isinstance(news_item, dict) and (news_item.get("title") or news_item.get("summary")):
+            for step in v2["steps"]:
+                if step.get("type") != "post_gen" or not step.get("enabled"):
+                    continue
+                cfg = step.get("config") or {}
+                await ctx.notify("📋 Готовлю пост по новости...")
+                chat_id = getattr(ctx.channel, "max_chat_id", None) if ctx.channel else None
+                recent_topics = await fetch_recent_post_topics(ctx.max_client, chat_id)
+                brief = (cfg.get("user_input") or "").strip()
+                style_profile = _style_profile_dict(ctx.channel)
+                ctx.post_text, post_topic = await generate_post_text(
+                    ctx.openai_client,
+                    brief,
+                    ctx.channel_title or "",
+                    bold_headings=bool(cfg.get("bold_headings", True)),
+                    use_emoji=bool(cfg.get("use_emoji", True)),
+                    comments_enabled=bool(cfg.get("comments_enabled", False)),
+                    recent_topics=recent_topics,
+                    news_item=news_item,
+                    style_profile=style_profile,
+                )
+                ctx.meta["post_topic"] = post_topic
+                logger.info(
+                    f"Pipeline post_gen news: generated len={len(ctx.post_text)} "
+                    f"run_id={ctx.run_id}"
+                )
+                return
+            return
+
+        schedule = v2.get("schedule") or {}
+        slot_time = None
+        if isinstance(ctx.meta, dict):
+            raw_slot = ctx.meta.get("slot_time")
+            if raw_slot is not None:
+                slot_time = str(raw_slot).strip() or None
+
         for step in v2["steps"]:
             if step.get("type") != "post_gen" or not step.get("enabled"):
                 continue
@@ -59,17 +202,41 @@ class PipelineRunner:
             mode = cfg.get("mode", "ai")
 
             if mode == "ai":
-                brief = (cfg.get("user_input") or "").strip()
+                brief = resolve_post_brief(schedule, cfg, slot_time)
                 if brief:
                     await ctx.notify("📋 Генерирую текст поста...")
                     chat_id = getattr(ctx.channel, "max_chat_id", None) if ctx.channel else None
                     recent_topics = await fetch_recent_post_topics(ctx.max_client, chat_id)
+
+                    # Consume topic queue only on real channel publishes (not Studio tests).
+                    queued_topic: str | None = None
+                    if getattr(ctx, "target", None) == "channel":
+                        queued_topic, remaining = pop_topic(
+                            get_topic_queue_from_post_cfg(cfg)
+                        )
+                        if queued_topic:
+                            ctx.meta["topic_queue_popped"] = True
+                            ctx.meta["topic_queue_remaining"] = remaining
+                            ctx.meta["topic_queue_block"] = "post_gen"
+                            exhausted = len(remaining) == 0
+                            ctx.meta["topic_queue_exhausted"] = exhausted
+                            # Keep in-memory cfg in sync for this run's later steps.
+                            cfg["topic_queue"] = remaining
+                            step["config"] = cfg
+                            logger.info(
+                                f"Pipeline post_gen ai: using queued topic "
+                                f"remaining={len(remaining)} run_id={ctx.run_id}"
+                            )
+                            if exhausted:
+                                await self._alert_topic_queue_exhausted(ctx)
+
                     logger.info(
                         f"Pipeline post_gen ai: generating from brief "
-                        f"len={len(brief)} recent_topics={len(recent_topics)} "
-                        f"run_id={ctx.run_id}"
+                        f"len={len(brief)} slot_time={slot_time!r} "
+                        f"recent_topics={len(recent_topics)} "
+                        f"queued_topic={bool(queued_topic)} run_id={ctx.run_id}"
                     )
-                    ctx.post_text = await generate_post_text(
+                    ctx.post_text, post_topic = await generate_post_text(
                         ctx.openai_client,
                         brief,
                         ctx.channel_title or "",
@@ -77,7 +244,9 @@ class PipelineRunner:
                         use_emoji=bool(cfg.get("use_emoji", True)),
                         comments_enabled=bool(cfg.get("comments_enabled", False)),
                         recent_topics=recent_topics,
+                        approved_topic=queued_topic,
                     )
+                    ctx.meta["post_topic"] = post_topic
                     logger.info(
                         f"Pipeline post_gen ai: generated len={len(ctx.post_text)} "
                         f"run_id={ctx.run_id}"
@@ -91,4 +260,5 @@ class PipelineRunner:
             seeded = (cfg.get("generated_post") or "").strip()
             if seeded:
                 ctx.post_text = seeded
+                ctx.meta["post_topic"] = topic_from_post_text(seeded)
             return

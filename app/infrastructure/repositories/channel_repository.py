@@ -52,6 +52,8 @@ class SQLAlchemyChannelRepository(ChannelRepository):
             style_profile=channel.style_profile.to_dict(),
             is_setup_complete=channel.is_setup_complete,
             channel_link=channel.channel_link,
+            telegram_chat_id=channel.telegram_chat_id,
+            telegram_link=channel.telegram_link,
         )
         self._session.add(model)
         await self._session.flush()
@@ -74,6 +76,8 @@ class SQLAlchemyChannelRepository(ChannelRepository):
                 is_active=channel.is_active,
                 is_setup_complete=channel.is_setup_complete,
                 channel_link=channel.channel_link,
+                telegram_chat_id=channel.telegram_chat_id,
+                telegram_link=channel.telegram_link,
             )
         )
         await self._session.flush()
@@ -111,4 +115,6 @@ class SQLAlchemyChannelRepository(ChannelRepository):
             is_active=model.is_active,
             is_setup_complete=model.is_setup_complete,
             channel_link=model.channel_link,
+            telegram_chat_id=model.telegram_chat_id,
+            telegram_link=model.telegram_link,
         )

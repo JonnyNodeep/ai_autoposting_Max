@@ -92,6 +92,9 @@ class VideoGenBlock:
                     tmp_path = watermarked
 
                 ctx.video_token = await ctx.max_client.upload_file(tmp_path, "video")
+                # Keep file for optional Telegram mirror; post_gen cleans up.
+                ctx.video_local_path = tmp_path
+                tmp_path = None
             finally:
                 if tmp_path:
                     try:

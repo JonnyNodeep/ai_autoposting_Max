@@ -1,7 +1,11 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from app.application.pipeline.normalize import (
     normalize_blocks_config,
+    resolve_post_brief,
     steps_to_ui_dict,
     ui_dict_to_v2,
     is_v2,
@@ -19,13 +23,19 @@ def test_normalize_legacy_dict_to_v2():
     v2 = normalize_blocks_config(DEFAULT_BLOCKS)
     assert v2["version"] == 2
     assert [s["type"] for s in v2["steps"]] == [
+        "story_gen",
         "image_prompt",
         "image_gen",
         "video_gen",
+        "tts_gen",
         "post_gen",
     ]
     assert "schedule" in v2
     assert v2["schedule"]["enabled"] is False
+    assert v2["schedule"]["per_slot_prompts"] is False
+    assert v2["schedule"]["slot_prompts"] == {}
+    assert "news_rss" in v2
+    assert v2["news_rss"]["enabled"] is False
     assert is_v2(v2)
 
 
@@ -38,7 +48,12 @@ def test_ui_roundtrip_preserves_fields():
             "generated_prompt": "",
             "instruction": "Сгенерируй картинку для этого поста",
         },
-        "image_gen": {"enabled": True, "model": "gpt-image-2"},
+        "image_gen": {
+            "enabled": True,
+            "model": "gpt-image-2",
+            "add_watermark": False,
+            "allow_text": False,
+        },
         "video_gen": {
             "enabled": False,
             "model": "seedance-1.5-pro",
@@ -63,7 +78,13 @@ def test_ui_roundtrip_preserves_fields():
             "use_emoji": True,
             "comments_enabled": False,
         },
-        "schedule": {"enabled": True, "frequency": "daily", "times": ["10:00"]},
+        "schedule": {
+            "enabled": True,
+            "frequency": "3x_day",
+            "times": ["05:00", "10:00"],
+            "per_slot_prompts": True,
+            "slot_prompts": {"05:00": "Гороскоп на день"},
+        },
     }
     v2 = ui_dict_to_v2(ui)
     back = steps_to_ui_dict(v2)
@@ -73,13 +94,125 @@ def test_ui_roundtrip_preserves_fields():
     assert back["post_gen"]["bold_headings"] is False
     assert back["post_gen"]["use_emoji"] is True
     assert back["post_gen"]["comments_enabled"] is False
-    assert back["schedule"]["times"] == ["10:00"]
+    assert back["schedule"]["times"] == ["05:00", "10:00"]
+    assert back["schedule"]["per_slot_prompts"] is True
+    assert back["schedule"]["slot_prompts"] == {"05:00": "Гороскоп на день"}
     assert back["image_gen"]["model"] == "gpt-image-2"
+    assert back["image_gen"]["add_watermark"] is False
+    assert back["image_gen"]["allow_text"] is False
     assert back["video_gen"]["model"] == "seedance-1.5-pro"
     assert back["video_gen"]["duration"] == 4
     assert back["video_gen"]["aspect_ratio"] == "9:16"
     assert back["video_gen"]["fallback_model"] == "wan2.5-image-to-video"
     assert back["video_gen"]["generate_audio"] is False
+
+
+def test_normalize_schedule_migrates_legacy_times():
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [],
+            "schedule": {"enabled": True, "frequency": "2x_day", "times": ["05:00", "12:00"]},
+        }
+    )
+    assert v2["schedule"]["per_slot_prompts"] is False
+    assert v2["schedule"]["slot_prompts"] == {}
+    assert v2["schedule"]["times"] == ["05:00", "12:00"]
+
+
+def test_normalize_schedule_drops_unknown_slot_prompts_and_empty():
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {
+                    "05:00": "  утро  ",
+                    "12:00": "",
+                    "99:00": "лишний",
+                },
+            },
+        }
+    )
+    assert v2["schedule"]["slot_prompts"] == {"05:00": "утро"}
+
+
+def test_resolve_post_brief_fallback_and_slot():
+    schedule = {
+        "per_slot_prompts": True,
+        "slot_prompts": {"05:00": "Гороскоп"},
+    }
+    post = {"user_input": "Общий бриф"}
+    assert resolve_post_brief(schedule, post, "05:00") == "Гороскоп"
+    assert resolve_post_brief(schedule, post, "12:00") == "Общий бриф"
+    assert resolve_post_brief({"per_slot_prompts": False, "slot_prompts": {"05:00": "X"}}, post, "05:00") == "Общий бриф"
+    assert resolve_post_brief(None, post, "05:00") == "Общий бриф"
+
+
+@pytest.mark.asyncio
+async def test_post_gen_uses_slot_prompt_when_enabled():
+    class _OAI:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def generate_text(self, prompt: str, system_prompt: str = "") -> str:
+            self.prompts.append(prompt)
+            return "Готовый пост"
+
+    class _Max:
+        async def get_messages(self, chat_id, count=50):
+            return []
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            return None
+
+    class _Channel:
+        max_chat_id = 1
+
+    oai = _OAI()
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=3,
+        max_client=_Max(),
+        openai_client=oai,
+        target="channel",
+        channel_title="Астро",
+        meta={"slot_time": "05:00"},
+    )
+    await PipelineRunner().run(
+        ctx,
+        {
+            "version": 2,
+            "steps": [
+                {
+                    "id": "1",
+                    "type": "post_gen",
+                    "enabled": True,
+                    "config": {
+                        "mode": "ai",
+                        "user_input": "Общий дневной контент",
+                        "add_channel_link": False,
+                    },
+                },
+            ],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {"05:00": "Гороскоп на сегодня"},
+            },
+        },
+    )
+    assert len(oai.prompts) == 1
+    assert "Гороскоп на сегодня" in oai.prompts[0]
+    assert "Общий дневной контент" not in oai.prompts[0]
+    assert ctx.post_text == "Готовый пост"
 
 
 @pytest.mark.asyncio
@@ -301,6 +434,112 @@ async def test_image_prompt_from_post_uses_seeded_post():
 
 
 @pytest.mark.asyncio
+async def test_image_prompt_from_topic_uses_meta_topic_not_full_post():
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=71,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        post_text="🌷 Пионы в вазе\n\nДлинный текст про уход за цветами и полив.",
+        meta={"post_topic": "Пионы в вазе"},
+    )
+    await ImagePromptBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "from_topic",
+            "instruction": "Сгенерируй картинку по этой теме",
+            "use_visual_style": False,
+        },
+    )
+    assert "Пионы в вазе" in ctx.image_prompt
+    assert "Сгенерируй картинку по этой теме" in ctx.image_prompt
+    assert "Длинный текст про уход" not in ctx.image_prompt
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_from_topic_fallback_first_line():
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=72,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        post_text="🌹 Розы на окне\n\nПодробный рецепт ухода за розами дома.",
+    )
+    await ImagePromptBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "from_topic",
+            "instruction": "Сгенерируй картинку по этой теме",
+            "use_visual_style": False,
+        },
+    )
+    assert "🌹 Розы на окне" in ctx.image_prompt
+    assert "Подробный рецепт ухода" not in ctx.image_prompt
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_from_topic_via_runner_seeded_post():
+    class GenBlock:
+        type_id = "image_gen"
+
+        async def execute(self, ctx, config):
+            if ctx.image_prompt:
+                ctx.image_url = f"img:{ctx.image_prompt[:40]}"
+
+    registry = BlockRegistry()
+    registry.register(ImagePromptBlock())
+    registry.register(GenBlock())
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=73,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+    )
+    await PipelineRunner(registry).run(
+        ctx,
+        {
+            "version": 2,
+            "steps": [
+                {
+                    "id": "1",
+                    "type": "image_prompt",
+                    "enabled": True,
+                    "config": {
+                        "mode": "from_topic",
+                        "instruction": "Сгенерируй картинку по этой теме",
+                        "use_visual_style": False,
+                    },
+                },
+                {"id": "2", "type": "image_gen", "enabled": True, "config": {}},
+                {
+                    "id": "3",
+                    "type": "post_gen",
+                    "enabled": True,
+                    "config": {
+                        "mode": "fixed",
+                        "generated_post": "Салат с киноа и авокадо\n\nИнгредиенты и шаги приготовления.",
+                    },
+                },
+            ],
+            "schedule": {"enabled": False, "frequency": "daily", "times": []},
+        },
+    )
+    assert ctx.meta.get("post_topic") == "Салат с киноа и авокадо"
+    assert "Салат с киноа и авокадо" in ctx.image_prompt
+    assert "Ингредиенты и шаги" not in ctx.image_prompt
+    assert ctx.image_url.startswith("img:")
+
+
+@pytest.mark.asyncio
 async def test_post_gen_ai_preseed_generates_each_run():
     class _OAI:
         def __init__(self) -> None:
@@ -377,15 +616,17 @@ async def test_post_gen_ai_preseed_generates_each_run():
             "schedule": {"enabled": False, "frequency": "daily", "times": []},
         },
     )
-    assert len(oai.calls) == 1
-    assert "без эмодзи" in oai.calls[0]["prompt"].lower() or "Не используй эмодзи" in oai.calls[0]["prompt"]
-    assert "**текст**" in oai.calls[0]["prompt"] or "жирным" in oai.calls[0]["prompt"].lower()
-    assert "комментарии" in oai.calls[0]["prompt"].lower()
-    assert "реакци" in oai.calls[0]["prompt"].lower()
-    assert "поделитесь с друзьями" in oai.calls[0]["prompt"].lower()
-    assert "Гречка с индейкой" in oai.calls[0]["prompt"]
-    assert "Салат с тунцом" in oai.calls[0]["prompt"]
-    assert "НЕ повторяй" in oai.calls[0]["prompt"]
+    assert len(oai.calls) >= 3
+    propose_prompt = oai.calls[0]["prompt"]
+    write_prompt = oai.calls[-1]["prompt"]
+    assert "Гречка с индейкой" in propose_prompt
+    assert "Салат с тунцом" in propose_prompt
+    assert "НЕ повторяй" in propose_prompt
+    assert "без эмодзи" in write_prompt.lower() or "Не используй эмодзи" in write_prompt
+    assert "**текст**" in write_prompt or "жирным" in write_prompt.lower()
+    assert "комментарии" in write_prompt.lower()
+    assert "реакци" in write_prompt.lower()
+    assert "поделитесь с друзьями" in write_prompt.lower()
     assert "СТАРОЕ ПРЕВЬЮ" not in ctx.post_text
     assert "Салат с киноа" in ctx.post_text
     assert len(sent) == 1
@@ -476,9 +717,126 @@ async def test_image_gen_passes_channel_link_for_watermark():
         target="channel",
         image_prompt="food photo",
     )
-    await ImageGenBlock().execute(ctx, {})
+    await ImageGenBlock().execute(ctx, {"add_watermark": True})
     assert calls == [{"prompt": "food photo", "channel_link": "https://max.ru/pp_recipes"}]
     assert ctx.image_url == "/tmp/img.png"
+
+
+@pytest.mark.asyncio
+async def test_image_gen_skips_watermark_when_disabled():
+    calls: list[dict] = []
+
+    class _OAI:
+        async def generate_image(self, prompt: str, channel_link: str | None = None):
+            calls.append({"prompt": prompt, "channel_link": channel_link})
+            return "/tmp/img.png"
+
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/pp_recipes",
+        run_id=2,
+        max_client=None,
+        openai_client=_OAI(),
+        target="channel",
+        image_prompt="food photo",
+    )
+    await ImageGenBlock().execute(ctx, {"add_watermark": False})
+    assert calls == [{"prompt": "food photo", "channel_link": None}]
+
+
+@pytest.mark.asyncio
+async def test_image_gen_appends_no_text_when_disallowed():
+    calls: list[dict] = []
+
+    class _OAI:
+        async def generate_image(self, prompt: str, channel_link: str | None = None):
+            calls.append({"prompt": prompt, "channel_link": channel_link})
+            return "/tmp/img.png"
+
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/pp_recipes",
+        run_id=3,
+        max_client=None,
+        openai_client=_OAI(),
+        target="channel",
+        image_prompt="Букет пионов на столе",
+    )
+    await ImageGenBlock().execute(
+        ctx,
+        {"add_watermark": True, "allow_text": False},
+    )
+    assert len(calls) == 1
+    assert "Букет пионов на столе" in calls[0]["prompt"]
+    assert "Без текста" in calls[0]["prompt"]
+    assert calls[0]["channel_link"] == "https://max.ru/pp_recipes"
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_from_news_uses_source_image():
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/ekb",
+        run_id=9,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        meta={
+            "news_item": {
+                "title": "Парк открыли",
+                "summary": "В городе открыли парк",
+                "image_url": "https://cdn.example.com/park.jpg",
+            }
+        },
+    )
+    await ImagePromptBlock().execute(ctx, {"enabled": True, "mode": "from_news"})
+    assert ctx.meta["image_source"] == "news"
+    assert ctx.image_prompt == ""
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_from_news_ai_fallback_without_image():
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/ekb",
+        run_id=10,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        meta={
+            "news_item": {
+                "title": "Парк открыли",
+                "summary": "В городе открыли парк у реки",
+                "image_url": None,
+            }
+        },
+    )
+    await ImagePromptBlock().execute(ctx, {"enabled": True, "mode": "from_news"})
+    assert ctx.meta["image_source"] == "ai"
+    assert "Парк открыли" in ctx.image_prompt
+    assert "у реки" in ctx.image_prompt
+
+
+@pytest.mark.asyncio
+async def test_image_gen_uses_news_url_without_openai():
+    class _OAI:
+        async def generate_image(self, prompt: str, channel_link: str | None = None):
+            raise AssertionError("should not generate")
+
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/ekb",
+        run_id=11,
+        max_client=None,
+        openai_client=_OAI(),
+        target="channel",
+        meta={
+            "image_source": "news",
+            "news_item": {"image_url": "https://cdn.example.com/park.jpg"},
+        },
+    )
+    await ImageGenBlock().execute(ctx, {})
+    assert ctx.image_url == "https://cdn.example.com/park.jpg"
 
 
 @pytest.mark.asyncio
@@ -516,7 +874,7 @@ async def test_image_gen_skips_watermark_when_video_follows():
                     "enabled": True,
                     "config": {"mode": "fixed", "generated_prompt": "open card"},
                 },
-                {"id": "2", "type": "image_gen", "enabled": True, "config": {}},
+                {"id": "2", "type": "image_gen", "enabled": True, "config": {"add_watermark": True}},
                 {
                     "id": "3",
                     "type": "video_gen",
@@ -601,3 +959,352 @@ async def test_post_gen_prefers_video_over_image():
     assert sent[0]["attachments"] == [
         {"type": "video", "payload": {"token": "vid-token"}}
     ]
+
+
+@pytest.mark.asyncio
+async def test_post_gen_deletes_local_image_after_upload(tmp_path):
+    local = tmp_path / "logo_abc.png"
+    local.write_bytes(b"fake-png")
+    uploaded: list[tuple[str, str]] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            uploaded.append((path, kind))
+            assert Path(path).exists()
+            return "img-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            return None
+
+    class _Channel:
+        max_chat_id = 42
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        image_url=str(local),
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "Пост с картинкой",
+            "add_channel_link": False,
+        },
+    )
+    assert uploaded == [(str(local), "image")]
+    assert not local.exists()
+    assert ctx.image_url == ""
+
+
+@pytest.mark.asyncio
+async def test_post_gen_keeps_remote_image_url():
+    class _Max:
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            return None
+
+    class _Channel:
+        max_chat_id = 42
+
+    remote = "https://cdn.example.com/news.jpg"
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        image_url=remote,
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "Новость",
+            "add_channel_link": False,
+        },
+    )
+    assert ctx.image_url == remote
+
+
+@pytest.mark.asyncio
+async def test_post_gen_uploads_audio_and_deletes_local_file(tmp_path):
+    local = tmp_path / "tts_story.mp3"
+    local.write_bytes(b"fake-mp3")
+    uploaded: list[tuple[str, str]] = []
+    sent: list[dict] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            uploaded.append((path, kind))
+            assert Path(path).exists()
+            return "audio-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"attachments": attachments})
+
+    class _Channel:
+        max_chat_id = 42
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        audio_local_path=str(local),
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "🎧 Аудиосказка",
+            "add_channel_link": False,
+        },
+    )
+    assert uploaded == [(str(local), "audio")]
+    assert sent[0]["attachments"] == [
+        {"type": "audio", "payload": {"token": "audio-token"}}
+    ]
+    assert not local.exists()
+    assert ctx.audio_local_path == ""
+
+
+@pytest.mark.asyncio
+async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path):
+    local_audio = tmp_path / "story.mp3"
+    local_audio.write_bytes(b"fake-mp3")
+    local_image = tmp_path / "cover.png"
+    local_image.write_bytes(b"fake-png")
+    sent: list[dict] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            return f"{kind}-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"text": text, "attachments": attachments})
+
+    class _Channel:
+        max_chat_id = 7
+        telegram_chat_id = None
+        telegram_link = None
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        image_url=str(local_image),
+        audio_local_path=str(local_audio),
+        post_text="Маленький ёжик",
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {"enabled": True, "add_channel_link": False},
+    )
+    assert len(sent) == 2
+    assert sent[0]["attachments"] == [
+        {"type": "image", "payload": {"token": "image-token"}}
+    ]
+    assert "ёжик" in sent[0]["text"]
+    assert sent[1]["attachments"] == [
+        {"type": "audio", "payload": {"token": "audio-token"}}
+    ]
+    assert not local_audio.exists()
+    assert not local_image.exists()
+
+
+@pytest.mark.asyncio
+async def test_tts_gen_writes_audio_path():
+    from app.application.pipeline.blocks.tts_gen import TtsGenBlock
+
+    class _OAI:
+        async def generate_speech(self, text, **kwargs):
+            assert "сказка" in text
+            assert kwargs["voice"] == "shimmer"
+            assert kwargs["speed"] == 0.85
+            return "/tmp/out.mp3"
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=_OAI(),
+        story_script="Длинная сказка про лес",
+    )
+    await TtsGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "model": "tts-1-hd",
+            "voice": "shimmer",
+            "speed": 0.85,
+        },
+    )
+    assert ctx.audio_local_path == "/tmp/out.mp3"
+
+
+@pytest.mark.asyncio
+async def test_story_gen_sets_caption_and_script():
+    from app.application.pipeline.blocks.story_gen import StoryGenBlock
+
+    class _OAI:
+        async def generate_text(self, prompt, system_prompt=None):
+            return json.dumps(
+                {
+                    "caption": "🌙 Сказка про Тима",
+                    "story": "Жил-был ёжик Тим. " * 20,
+                },
+                ensure_ascii=False,
+            )
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=_OAI(),
+        target="user",
+        channel_title="Аудиосказки",
+    )
+    await StoryGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "ai",
+            "user_input": "добрые сказки",
+            "target_minutes": 5,
+        },
+    )
+    assert ctx.post_text.startswith("🌙")
+    assert "ёжик" in ctx.story_script
+
+
+def test_migrate_story_topic_queue_into_post_gen():
+    from app.application.pipeline.normalize import normalize_blocks_config
+
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [
+                {
+                    "id": "s",
+                    "type": "story_gen",
+                    "enabled": True,
+                    "config": {"topic_queue": ["Тема А", "Тема Б"], "target_minutes": 5},
+                },
+                {
+                    "id": "p",
+                    "type": "post_gen",
+                    "enabled": False,
+                    "config": {"topic_queue": []},
+                },
+            ],
+            "schedule": {"enabled": False, "frequency": "daily", "times": []},
+        }
+    )
+    story = next(s for s in v2["steps"] if s["type"] == "story_gen")
+    post = next(s for s in v2["steps"] if s["type"] == "post_gen")
+    assert post["config"]["topic_queue"] == ["Тема А", "Тема Б"]
+    assert story["config"]["topic_queue"] == []
+
+
+@pytest.mark.asyncio
+async def test_story_gen_pops_shared_post_topic_queue():
+    from app.application.pipeline.blocks.story_gen import StoryGenBlock
+    import json
+
+    class _OAI:
+        async def generate_text(self, prompt, system_prompt=None):
+            assert "Ёжик" in prompt
+            return json.dumps(
+                {"caption": "Анонс", "story": "Длинная сказка про лес."},
+                ensure_ascii=False,
+            )
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=_OAI(),
+        target="channel",
+        channel_title="Аудиосказки",
+        meta={"shared_topic_queue": ["Ёжик и луна", "Ещё"]},
+    )
+    await StoryGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "ai",
+            "user_input": "добрые сказки",
+            "target_minutes": 5,
+        },
+    )
+    assert ctx.meta["topic_queue_block"] == "post_gen"
+    assert ctx.meta["topic_queue_remaining"] == ["Ещё"]
+    assert ctx.meta["shared_topic_queue"] == ["Ещё"]
+    assert ctx.post_text == "Анонс"
+    from app.application.pipeline.tts_chunking import chunk_tts_text
+
+    part = "А" * 2000
+    text = f"{part}.\n\n{part}.\n\n{part}."
+    chunks = chunk_tts_text(text, max_chars=4096)
+    assert len(chunks) >= 2
+    assert all(len(c) <= 4096 for c in chunks)
+
+
+@pytest.mark.asyncio
+async def test_runner_skips_post_preseed_when_story_gen_enabled():
+    from unittest.mock import AsyncMock
+
+    class _Story:
+        type_id = "story_gen"
+
+        async def execute(self, ctx, config):
+            if config.get("enabled"):
+                ctx.story_script = "story body"
+                ctx.post_text = "caption"
+
+    class _Post:
+        type_id = "post_gen"
+
+        async def execute(self, ctx, config):
+            pass
+
+    registry = BlockRegistry()
+    registry.register(_Story())
+    registry.register(_Post())
+    oai = AsyncMock()
+    oai.generate_text = AsyncMock(side_effect=AssertionError("should not preseed"))
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=oai,
+        target="user",
+    )
+    config = {
+        "version": 2,
+        "steps": [
+            {"id": "s", "type": "story_gen", "enabled": True, "config": {"mode": "ai"}},
+            {"id": "p", "type": "post_gen", "enabled": True, "config": {}},
+        ],
+        "schedule": {"enabled": False, "frequency": "daily", "times": []},
+    }
+    await PipelineRunner(registry).run(ctx, config)
+    assert ctx.story_script == "story body"
+    assert ctx.post_text == "caption"
+    oai.generate_text.assert_not_called()
+

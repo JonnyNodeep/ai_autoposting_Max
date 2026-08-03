@@ -1,15 +1,54 @@
 from loguru import logger
 
+from app.application.auth.admin_access import (
+    display_channels_limit,
+    format_channels_quota,
+)
 from app.application.auth.register_user import RegisterUserUseCase
 from app.application.channels.create_channel import CreateChannelUseCase
+from app.application.channels.telegram_bind import unbind_telegram
 from app.bot.dispatcher import UpdateDispatcher, UpdateType
+from app.bot.handlers.telegram_bind_ui import (
+    show_channel_telegram_card,
+    start_telegram_chat_wait,
+)
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.config import settings
 from app.infrastructure.database.session import async_session_factory
+from app.infrastructure.redis.client import get_redis
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
 from app.infrastructure.repositories.subscription_repository import SQLAlchemySubscriptionRepository
 from app.infrastructure.repositories.user_repository import SQLAlchemyUserRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
+
+
+async def _record_member_event(update: dict, event_type: str) -> None:
+    chat_id = update.get("chat_id")
+    if not chat_id:
+        return
+    user_data = update.get("user") or {}
+    max_user_id = user_data.get("user_id")
+    try:
+        async with async_session_factory() as session:
+            channel_repo = SQLAlchemyChannelRepository(session)
+            channel = await channel_repo.get_by_max_chat_id(int(chat_id))
+            if not channel or not channel.is_active:
+                return
+            from app.infrastructure.repositories.usage_stats_repository import UsageStatsRepository
+
+            stats_repo = UsageStatsRepository(session)
+            await stats_repo.record_member_event(
+                channel_id=channel.id,
+                max_chat_id=int(chat_id),
+                event_type=event_type,
+                max_user_id=int(max_user_id) if max_user_id else None,
+            )
+            await session.commit()
+            logger.debug(
+                f"member_event={event_type} channel_id={channel.id} chat_id={chat_id} user={max_user_id}"
+            )
+    except Exception:
+        logger.exception(f"Failed to record member event {event_type} for chat_id={chat_id}")
 
 
 def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
@@ -49,7 +88,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 subscription = await subscription_repo.get_active_by_user(user.id)
                 tier_name = subscription.tier.value if subscription else "solo"
                 channels_count = await channel_repo.count_by_owner(user.id)
-                channels_limit = subscription.tier.channels_limit if subscription else 0
+                channels_limit = display_channels_limit(max_user_id, subscription)
 
                 await max_client.send_message_to_user(
                     user_id=max_user_id,
@@ -58,7 +97,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                         f"Я Автопостинг Макс — твой AI-редактор для каналов MAX.\n\n"
                         f"Твой user\\_id: `{max_user_id}`\n"
                         f"Твой тариф: *{tier_name.upper()}*\n"
-                        f"Каналы: {channels_count} из {channels_limit}\n\n"
+                        f"Каналы: {format_channels_quota(channels_count, channels_limit)}\n\n"
                         f"Выбери действие:"
                     ),
                     attachments=[InlineKeyboardBuilder.main_menu(max_user_id, channels_count, channels_limit)],
@@ -75,6 +114,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                     channel_repo=channel_repo,
                     subscription_repo=subscription_repo,
                     max_client=max_client,
+                    user_repo=user_repo,
                 )
                 channel = await use_case.execute(owner_id=user.id, max_chat_id=chat_id)
                 await session.commit()
@@ -146,6 +186,14 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 await session.commit()
                 logger.info(f"BOT_REMOVED: stopped pipeline for channel {channel.id}")
 
+    @dispatcher.register(UpdateType.USER_ADDED)
+    async def on_user_added(update: dict) -> None:
+        await _record_member_event(update, "joined")
+
+    @dispatcher.register(UpdateType.USER_REMOVED)
+    async def on_user_removed(update: dict) -> None:
+        await _record_member_event(update, "left")
+
     @dispatcher.register(UpdateType.MESSAGE_CALLBACK, prefixes=["channels:"])
     async def on_channels_callback(update: dict) -> None:
         cb = update.get("callback", {})
@@ -167,7 +215,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
 
             channels_count = await channel_repo.count_by_owner(user_id) if user_id else 0
             subscription = await subscription_repo.get_active_by_user(user_id) if user_id else None
-            channels_limit = subscription.channels_limit if subscription else 0
+            channels_limit = display_channels_limit(max_user_id, subscription)
 
             async def _owns_channel(channel_id: int) -> bool:
                 if not user_id:
@@ -191,9 +239,9 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                         "5. Канал появится здесь автоматически\n\n"
                         "⚡️ Сразу после добавления бот предложит настроить канал."
                     )
-                    if channels_limit > 0:
+                    if channels_limit is None or channels_limit > 0:
                         add_text = (
-                            f"Доступно: {channels_count} из {channels_limit} каналов\n\n"
+                            f"Доступно: {format_channels_quota(channels_count, channels_limit)} каналов\n\n"
                         ) + add_text
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
@@ -283,6 +331,66 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                             fmt="markdown",
                         )
 
+                elif callback_data.startswith("channels:select:"):
+                    channel_id = int(callback_data.split(":")[2])
+                    if not await _owns_channel(channel_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Нет доступа к этому каналу.",
+                        )
+                        return
+                    ch = await channel_repo.get_by_id(channel_id)
+                    if ch:
+                        await show_channel_telegram_card(max_user_id, ch, max_client)
+
+                elif callback_data.startswith("channels:tg:bind:"):
+                    channel_id = int(callback_data.split(":")[3])
+                    if not await _owns_channel(channel_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Нет доступа к этому каналу.",
+                        )
+                        return
+                    await start_telegram_chat_wait(
+                        max_user_id, channel_id, max_client, source="channels"
+                    )
+
+                elif callback_data.startswith("channels:tg:unbind:"):
+                    channel_id = int(callback_data.split(":")[3])
+                    if not await _owns_channel(channel_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text="Нет доступа к этому каналу.",
+                        )
+                        return
+                    ch = await channel_repo.get_by_id(channel_id)
+                    if ch:
+                        result = await unbind_telegram(ch, channel_repo=channel_repo)
+                        await session.commit()
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text=result.message,
+                        )
+                        ch = await channel_repo.get_by_id(channel_id)
+                        if ch:
+                            await show_channel_telegram_card(max_user_id, ch, max_client)
+
+                elif callback_data.startswith("channels:tg:skip_link:"):
+                    channel_id = int(callback_data.split(":")[3])
+                    redis = await get_redis()
+                    await redis.delete(f"tg_bind_link:{max_user_id}")
+                    ch = await channel_repo.get_by_id(channel_id)
+                    if ch:
+                        await show_channel_telegram_card(max_user_id, ch, max_client)
+
+                elif callback_data.startswith("channels:tg:skip:"):
+                    channel_id = int(callback_data.split(":")[3])
+                    redis = await get_redis()
+                    await redis.delete(f"tg_bind_chat:{max_user_id}")
+                    await redis.delete(f"tg_bind_link:{max_user_id}")
+                    ch = await channel_repo.get_by_id(channel_id)
+                    if ch:
+                        await show_channel_telegram_card(max_user_id, ch, max_client)
 
             except Exception:
                 logger.exception(f"Error handling callback: {callback_data}")
@@ -331,7 +439,8 @@ async def handle_channels_list(
     builder = InlineKeyboardBuilder()
     for ch in channels:
         status = "Настроен" if ch.is_setup_complete else "Не настроен"
-        lines.append(f"• *{ch.title}* — {status}")
+        tg = " · TG" if ch.telegram_chat_id else ""
+        lines.append(f"• *{ch.title}* — {status}{tg}")
         if ch.is_setup_complete:
             builder.row((f"{ch.title}", f"channels:select:{ch.id}"), ("❌", f"channels:delete:{ch.id}"))
         else:

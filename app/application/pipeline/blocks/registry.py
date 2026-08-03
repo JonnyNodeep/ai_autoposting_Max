@@ -5,6 +5,8 @@ from typing import Any
 from app.application.pipeline.blocks.image_gen import ImageGenBlock
 from app.application.pipeline.blocks.image_prompt import ImagePromptBlock
 from app.application.pipeline.blocks.post_gen import PostGenBlock
+from app.application.pipeline.blocks.story_gen import StoryGenBlock
+from app.application.pipeline.blocks.tts_gen import TtsGenBlock
 from app.application.pipeline.blocks.video_gen import VideoGenBlock
 
 # Future block types (not implemented yet):
@@ -27,9 +29,11 @@ class BlockRegistry:
 
 def build_default_registry() -> BlockRegistry:
     registry = BlockRegistry()
+    registry.register(StoryGenBlock())
     registry.register(ImagePromptBlock())
     registry.register(ImageGenBlock())
     registry.register(VideoGenBlock())
+    registry.register(TtsGenBlock())
     registry.register(PostGenBlock())
     return registry
 

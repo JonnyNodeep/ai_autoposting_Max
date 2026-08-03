@@ -25,3 +25,5 @@ class ChannelModel(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_setup_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     channel_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    telegram_link: Mapped[str | None] = mapped_column(String(512), nullable=True)

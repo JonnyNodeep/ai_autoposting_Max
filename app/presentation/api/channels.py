@@ -52,12 +52,16 @@ async def create_channel(body: ChannelCreateRequest, owner_id: int) -> ChannelRe
     async for session in get_session():
         channel_repo = SQLAlchemyChannelRepository(session)
         subscription_repo = SQLAlchemySubscriptionRepository(session)
+        from app.infrastructure.repositories.user_repository import SQLAlchemyUserRepository
+
+        user_repo = SQLAlchemyUserRepository(session)
         max_client = MaxAPIHTTPClient()
 
         use_case = CreateChannelUseCase(
             channel_repo=channel_repo,
             subscription_repo=subscription_repo,
             max_client=max_client,
+            user_repo=user_repo,
         )
         channel = await use_case.execute(owner_id=owner_id, max_chat_id=body.max_chat_id)
         await session.commit()
@@ -79,6 +83,10 @@ async def update_channel(channel_id: int, body: ChannelUpdateRequest, owner_id: 
             ch.title = body.title
         if body.description is not None:
             ch.description = body.description
+        if "telegram_chat_id" in body.model_fields_set:
+            ch.telegram_chat_id = body.telegram_chat_id
+        if "telegram_link" in body.model_fields_set:
+            ch.telegram_link = body.telegram_link
 
         await repo.update(ch)
         await session.commit()
@@ -169,4 +177,6 @@ def _channel_to_response(ch) -> ChannelResponse:
         content_frequency=ch.content_frequency,
         is_active=ch.is_active,
         is_setup_complete=ch.is_setup_complete,
+        telegram_chat_id=getattr(ch, "telegram_chat_id", None),
+        telegram_link=getattr(ch, "telegram_link", None),
     )
