@@ -60,7 +60,7 @@ _parse_time = parse_time_hh_mm
 
 def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
     @dispatcher.register(UpdateType.MESSAGE_CREATED)
-    async def on_message_created(update: dict) -> None:
+    async def on_message_created(update: dict) -> bool:
         msg = update.get("message", {})
         user_obj = update.get("user", {}) or {}
         sender = msg.get("sender", {}) or {}
@@ -89,7 +89,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                 "message_created without user_id; user_obj_keys="
                 f"{list(user_obj.keys())[:5]} sender_keys={list(sender.keys())[:5]}"
             )
-            return
+            return False
 
         async with async_session_factory() as session:
             user_repo = SQLAlchemyUserRepository(session)
@@ -118,62 +118,59 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         fmt="markdown",
                     )
                     await max_client.close()
-                    return
+                    return True
 
                 redis = await get_redis()
                 from app.bot.ai_studio_text_input import (
                     SCHEDULE_CUSTOM_HINT,
-                    has_pending_studio_text_input,
-                    is_ai_studio_session_active,
+                    SETUP_TEXT_KINDS,
+                    claim_text_input,
+                    get_text_owner,
+                    release_text_input,
                 )
 
-                if await has_pending_studio_text_input(redis, max_user_id):
-                    return
-
-                # Mid schedule-slot picker: text without «Своё время» — hint, never main menu.
-                if message_text and await redis.get(f"ai_schedule_slots:{max_user_id}"):
-                    if not await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text=SCHEDULE_CUSTOM_HINT,
-                        )
-                        await max_client.close()
-                        return
-
-                if await is_ai_studio_session_active(redis, max_user_id):
+                owner = await get_text_owner(redis, max_user_id)
+                if owner and owner[0] not in SETUP_TEXT_KINDS:
+                    # Another flow owns text input — do not steal.
                     await max_client.close()
-                    return
+                    return False
 
                 async def _setup_done() -> None:
                     await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
 
-                if await handle_telegram_link_message(
-                    max_user_id,
-                    message_text,
-                    channel_repo=channel_repo,
-                    max_client=max_client,
-                    session=session,
-                    on_setup_done=_setup_done,
-                ):
-                    await max_client.close()
-                    return
+                if owner and owner[0] == "telegram_link" and message_text:
+                    if await handle_telegram_link_message(
+                        max_user_id,
+                        message_text,
+                        channel_repo=channel_repo,
+                        max_client=max_client,
+                        session=session,
+                        on_setup_done=_setup_done,
+                        owner_payload=owner[1],
+                    ):
+                        await max_client.close()
+                        return True
 
-                if await handle_telegram_chat_id_message(
-                    max_user_id,
-                    message_text,
-                    channel_repo=channel_repo,
-                    max_client=max_client,
-                    session=session,
-                    on_setup_done=_setup_done,
-                ):
-                    await max_client.close()
-                    return
+                if owner and owner[0] == "telegram_chat" and message_text:
+                    if await handle_telegram_chat_id_message(
+                        max_user_id,
+                        message_text,
+                        channel_repo=channel_repo,
+                        max_client=max_client,
+                        session=session,
+                        on_setup_done=_setup_done,
+                        owner_payload=owner[1],
+                    ):
+                        await max_client.close()
+                        return True
 
-                style_prompt_data = await redis.get(f"style_prompt:{max_user_id}")
-                if style_prompt_data and message_text:
-                    data = json.loads(style_prompt_data)
-                    ch_id = int(data["ch_id"])
-                    await redis.delete(f"style_prompt:{max_user_id}")
+                if owner and owner[0] == "style_prompt" and message_text:
+                    raw_payload = owner[1]
+                    try:
+                        ch_id = int(raw_payload)
+                    except ValueError:
+                        ch_id = int(json.loads(raw_payload)["ch_id"])
+                    await release_text_input(redis, max_user_id, "style_prompt")
                     ch = await channel_repo.get_by_id(ch_id)
                     if ch:
                         sp = ch.style_profile
@@ -203,12 +200,11 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         attachments=[builder.build()],
                     )
                     await max_client.close()
-                    return
+                    return True
 
-                refpost_ch_id = await redis.get(f"setup_refpost:{max_user_id}")
-                if refpost_ch_id and message_text:
-                    ch_id = int(refpost_ch_id)
-                    await redis.delete(f"setup_refpost:{max_user_id}")
+                if owner and owner[0] == "setup_refpost" and message_text:
+                    ch_id = int(owner[1])
+                    await release_text_input(redis, max_user_id, "setup_refpost")
                     ch = await channel_repo.get_by_id(ch_id)
                     if ch:
                         ch.style_profile.reference_post = message_text[:4000]
@@ -222,21 +218,20 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         max_user_id, ch_id, fsm, channel_repo, max_client, session
                     )
                     await max_client.close()
-                    return
+                    return True
 
-                setup_time_ch_id = await redis.get(f"setup_time:{max_user_id}")
-                if setup_time_ch_id and message_text:
-                    ch_id = int(setup_time_ch_id)
-                    await redis.delete(f"setup_time:{max_user_id}")
+                if owner and owner[0] == "setup_time" and message_text:
+                    ch_id = int(owner[1])
+                    await release_text_input(redis, max_user_id, "setup_time")
                     parsed = _parse_time(message_text)
                     if parsed is None:
-                        await redis.setex(f"setup_time:{max_user_id}", 1800, str(ch_id))
+                        await claim_text_input(redis, max_user_id, "setup_time", str(ch_id), REDIS_TTL)
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
                         )
                         await max_client.close()
-                        return
+                        return True
                     hour_msk, minute_msk = parsed
                     hour_utc = (hour_msk - 3) % 24
                     time_str = f"{hour_utc:02d}:{minute_msk:02d}"
@@ -256,43 +251,44 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                         fmt="markdown",
                     )
                     await max_client.close()
-                    return
+                    return True
 
-                setup_slot_custom = await redis.get(f"setup_slot_custom:{max_user_id}")
-                if setup_slot_custom and message_text:
-                    parts = str(setup_slot_custom).split(":")
+                if owner and owner[0] == "setup_slot_custom" and message_text:
+                    parts = str(owner[1]).split(":")
                     ch_id = int(parts[0])
                     slot_idx = int(parts[1])
-                    await redis.delete(f"setup_slot_custom:{max_user_id}")
+                    await release_text_input(redis, max_user_id, "setup_slot_custom")
                     parsed = _parse_time(message_text)
                     if parsed is None:
-                        await redis.setex(f"setup_slot_custom:{max_user_id}", 1800, str(setup_slot_custom))
+                        await claim_text_input(
+                            redis, max_user_id, "setup_slot_custom", str(owner[1]), REDIS_TTL
+                        )
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
                         )
                         await max_client.close()
-                        return
+                        return True
                     hour_msk, minute_msk = parsed
                     hour_utc = (hour_msk - 3) % 24
                     time_str = f"{hour_utc:02d}:{minute_msk:02d}"
-                    await _process_slot_time(max_user_id, ch_id, slot_idx, time_str, channel_repo, session, max_client, hour_msk)
+                    await _process_slot_time(
+                        max_user_id, ch_id, slot_idx, time_str, channel_repo, session, max_client, hour_msk
+                    )
                     await max_client.close()
-                    return
+                    return True
 
-                # Channel setup multi-slot: typed time without «Своё время».
-                if message_text and await redis.get(f"setup_slots:{max_user_id}"):
-                    if not await redis.get(f"setup_slot_custom:{max_user_id}"):
-                        await max_client.send_message_to_user(
-                            user_id=max_user_id,
-                            text=SCHEDULE_CUSTOM_HINT,
-                        )
-                        await max_client.close()
-                        return
+                if owner and owner[0] == "setup_time_pick" and message_text:
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=SCHEDULE_CUSTOM_HINT,
+                    )
+                    await max_client.close()
+                    return True
 
-                # Do not dump unmatched DMs to main menu — that fights AI Studio / wizards.
+                # No setup text owner — ignore unmatched DMs (never dump to main menu).
                 await max_client.close()
-                return
+                return False
 
             use_case = RegisterUserUseCase(
                 user_repo=user_repo,
@@ -328,6 +324,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
             )
 
             await max_client.close()
+            return True
 
 
 def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
@@ -428,6 +425,12 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                             json.dumps({"ch_id": ch_id, "slot": 0, "total": slots, "times": []}))
                         await _show_slot_time_picker(max_client, max_user_id, ch_id, 0, slots)
                     elif ch_id:
+                        from app.bot.ai_studio_text_input import claim_text_input
+
+                        redis_local = await get_redis()
+                        await claim_text_input(
+                            redis_local, max_user_id, "setup_time_pick", str(ch_id), REDIS_TTL
+                        )
                         builder = InlineKeyboardBuilder()
                         builder.row(("12:00 МСК", f"setup:time:{ch_id}:12"), ("15:00 МСК", f"setup:time:{ch_id}:15"))
                         builder.row(("18:00 МСК", f"setup:time:{ch_id}:18"), ("21:00 МСК", f"setup:time:{ch_id}:21"))
@@ -439,6 +442,10 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                         )
 
                 elif callback_data == "setup:style:approve":
+                    from app.bot.ai_studio_text_input import release_text_input
+
+                    redis_local = await get_redis()
+                    await release_text_input(redis_local, max_user_id, "style_prompt")
                     state = await fsm.get_state(max_user_id)
                     ch_id = state["channel_id"] if state else None
                     if ch_id:
@@ -497,8 +504,6 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                     state = await fsm.get_state(max_user_id)
                     ch_id = state["channel_id"] if state else None
                     if ch_id:
-                        redis_local = await get_redis()
-                        await redis_local.setex(f"setup_refpost:{max_user_id}", REDIS_TTL, str(ch_id))
                         builder = InlineKeyboardBuilder()
                         builder.row(("Да, дать пример", "setup:refpost:yes"))
                         builder.row(("Нет, AI-анализ", "setup:refpost:no"))
@@ -516,8 +521,6 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                     state = await fsm.get_state(max_user_id)
                     ch_id = state["channel_id"] if state else None
                     if ch_id:
-                        redis_local = await get_redis()
-                        await redis_local.setex(f"setup_refpost:{max_user_id}", REDIS_TTL, str(ch_id))
                         builder = InlineKeyboardBuilder()
                         builder.row(("Да, дать пример", "setup:refpost:yes"))
                         builder.row(("Нет, AI-анализ", "setup:refpost:no"))
@@ -535,8 +538,12 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                     state = await fsm.get_state(max_user_id)
                     ch_id = state["channel_id"] if state else None
                     if ch_id:
+                        from app.bot.ai_studio_text_input import claim_text_input
+
                         redis_local = await get_redis()
-                        await redis_local.setex(f"style_prompt:{max_user_id}", REDIS_TTL, json.dumps({"ch_id": ch_id}))
+                        await claim_text_input(
+                            redis_local, max_user_id, "style_prompt", str(ch_id), REDIS_TTL
+                        )
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text="Напиши пожелания AI-агенту.\nНапример: «пиши коротко, только факты, без воды, один эмодзи в начале»",
@@ -678,14 +685,12 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                         await _continue_setup_after_time(max_user_id, ch_id, channel_repo, openai_client, max_client, session)
 
                 elif callback_data == "setup:refpost:no":
+                    from app.bot.ai_studio_text_input import release_text_input
+
                     redis_local = await get_redis()
-                    refpost_ch_id = await redis_local.get(f"setup_refpost:{max_user_id}")
-                    ch_id = int(refpost_ch_id) if refpost_ch_id else None
-                    if refpost_ch_id:
-                        await redis_local.delete(f"setup_refpost:{max_user_id}")
-                    if not ch_id:
-                        state = await fsm.get_state(max_user_id)
-                        ch_id = state["channel_id"] if state else None
+                    await release_text_input(redis_local, max_user_id, "setup_refpost")
+                    state = await fsm.get_state(max_user_id)
+                    ch_id = state["channel_id"] if state else None
                     await offer_telegram_after_setup(
                         max_user_id, ch_id, fsm, channel_repo, max_client, session
                     )
@@ -704,21 +709,30 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
 
                 elif callback_data.startswith("setup:tg:skip_link:"):
                     ch_id = int(callback_data.split(":")[3])
+                    from app.bot.ai_studio_text_input import release_text_input
+
                     redis_local = await get_redis()
-                    await redis_local.delete(f"tg_bind_link:{max_user_id}")
+                    await release_text_input(redis_local, max_user_id, "telegram_link")
                     await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
 
                 elif callback_data.startswith("setup:tg:skip:"):
                     ch_id = int(callback_data.split(":")[3])
+                    from app.bot.ai_studio_text_input import clear_text_inputs
+
                     redis_local = await get_redis()
-                    await redis_local.delete(f"tg_bind_chat:{max_user_id}")
-                    await redis_local.delete(f"tg_bind_link:{max_user_id}")
+                    await clear_text_inputs(redis_local, max_user_id)
                     await finish_setup(max_user_id, fsm, channel_repo, max_client, session)
 
                 elif callback_data == "setup:refpost:yes":
-                    redis_local = await get_redis()
-                    refpost_ch_id = await redis_local.get(f"setup_refpost:{max_user_id}")
-                    if refpost_ch_id:
+                    state = await fsm.get_state(max_user_id)
+                    ch_id = state["channel_id"] if state else None
+                    if ch_id:
+                        from app.bot.ai_studio_text_input import claim_text_input
+
+                        redis_local = await get_redis()
+                        await claim_text_input(
+                            redis_local, max_user_id, "setup_refpost", str(ch_id), REDIS_TTL
+                        )
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text="Отправь текст одного поста — я запомню его формат.",
@@ -729,11 +743,30 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
 
                 elif callback_data.startswith("setup:time:custom:"):
                     ch_id = int(callback_data.split(":")[3])
+                    from app.bot.ai_studio_text_input import claim_text_input
+
                     redis_local = await get_redis()
-                    await redis_local.setex(f"setup_time:{max_user_id}", REDIS_TTL, str(ch_id))
+                    await claim_text_input(
+                        redis_local, max_user_id, "setup_time", str(ch_id), REDIS_TTL
+                    )
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
                         text="Напиши время в формате ЧЧ:ММ (по Москве).\nНапример: 14:30",
+                    )
+
+                elif callback_data.startswith("setup:time:skip:"):
+                    from app.bot.ai_studio_text_input import release_text_input
+
+                    redis_local = await get_redis()
+                    await release_text_input(redis_local, max_user_id, "setup_time_pick")
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=(
+                            "Настройка канала завершена!\n\n"
+                            "Ты сможешь выбрать время при создании контент-плана."
+                        ),
+                        attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+                        fmt="markdown",
                     )
 
                 elif callback_data.startswith("setup:time:"):
@@ -741,6 +774,10 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                     hour_msk = int(callback_data.split(":")[4])
                     hour_utc = (hour_msk - 3) % 24
                     time_str = f"{hour_utc:02d}:00"
+                    from app.bot.ai_studio_text_input import release_text_input
+
+                    redis_local = await get_redis()
+                    await release_text_input(redis_local, max_user_id, "setup_time_pick")
                     ch = await channel_repo.get_by_id(ch_id)
                     if ch:
                         ch.style_profile.default_time = time_str
@@ -761,23 +798,20 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                             fmt="markdown",
                         )
 
-                elif callback_data.startswith("setup:time:skip:"):
-                    await max_client.send_message_to_user(
-                        user_id=max_user_id,
-                        text=(
-                            "Настройка канала завершена!\n\n"
-                            "Ты сможешь выбрать время при создании контент-плана."
-                        ),
-                        attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
-                        fmt="markdown",
-                    )
-
                 elif callback_data.startswith("setup:slot:custom:"):
                     parts = callback_data.split(":")
                     ch_id = int(parts[3])
                     slot_idx = int(parts[4])
+                    from app.bot.ai_studio_text_input import claim_text_input
+
                     redis_local = await get_redis()
-                    await redis_local.setex(f"setup_slot_custom:{max_user_id}", REDIS_TTL, f"{ch_id}:{slot_idx}")
+                    await claim_text_input(
+                        redis_local,
+                        max_user_id,
+                        "setup_slot_custom",
+                        f"{ch_id}:{slot_idx}",
+                        REDIS_TTL,
+                    )
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
                         text=f"Напиши время для слота {slot_idx + 1} в формате ЧЧ:ММ:\nНапример: 14:30",
@@ -790,6 +824,10 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                     hour_msk = int(parts[5])
                     hour_utc = (hour_msk - 3) % 24
                     time_str = f"{hour_utc:02d}:00"
+                    from app.bot.ai_studio_text_input import release_text_input
+
+                    redis_local = await get_redis()
+                    await release_text_input(redis_local, max_user_id, "setup_time_pick")
                     await _process_slot_time(max_user_id, ch_id, slot_idx, time_str, channel_repo, session, max_client, hour_msk)
 
                 elif callback_data.startswith("setup:visual:analyze:"):
@@ -892,6 +930,16 @@ async def finish_setup(
 
 
 async def _show_slot_time_picker(max_client, max_user_id, ch_id, slot_idx, total):
+    from app.bot.ai_studio_text_input import claim_text_input
+
+    redis_local = await get_redis()
+    await claim_text_input(
+        redis_local,
+        max_user_id,
+        "setup_time_pick",
+        f"{ch_id}:{slot_idx}",
+        REDIS_TTL,
+    )
     builder = InlineKeyboardBuilder()
     builder.row(
         ("12:00 МСК", f"setup:slot:{ch_id}:{slot_idx}:12"),

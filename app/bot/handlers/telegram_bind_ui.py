@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 from app.application.channels.telegram_bind import (
-    REDIS_TG_CHAT_WAIT,
-    REDIS_TG_LINK_WAIT,
     REDIS_TG_TTL,
     bind_telegram_chat,
     normalize_telegram_link,
@@ -11,16 +9,9 @@ from app.application.channels.telegram_bind import (
     set_telegram_link,
     unbind_telegram,
 )
+from app.bot.ai_studio_text_input import claim_text_input, release_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.infrastructure.redis.client import get_redis
-
-
-def _wait_chat_key(user_id: int) -> str:
-    return REDIS_TG_CHAT_WAIT.format(user_id=user_id)
-
-
-def _wait_link_key(user_id: int) -> str:
-    return REDIS_TG_LINK_WAIT.format(user_id=user_id)
 
 
 async def offer_telegram_mirror(
@@ -51,8 +42,13 @@ async def start_telegram_chat_wait(
     source: str = "setup",
 ) -> None:
     redis = await get_redis()
-    await redis.delete(_wait_link_key(max_user_id))
-    await redis.setex(_wait_chat_key(max_user_id), REDIS_TG_TTL, f"{channel_id}:{source}")
+    await claim_text_input(
+        redis,
+        max_user_id,
+        "telegram_chat",
+        f"{channel_id}:{source}",
+        REDIS_TG_TTL,
+    )
     await max_client.send_message_to_user(
         user_id=max_user_id,
         text=(
@@ -100,21 +96,34 @@ async def handle_telegram_chat_id_message(
     max_client,
     session,
     on_setup_done,
+    owner_payload: str | None = None,
 ) -> bool:
     """Returns True if message was consumed as TG bind input."""
     redis = await get_redis()
-    raw = await redis.get(_wait_chat_key(max_user_id))
-    if not raw:
-        return False
+    raw = owner_payload
+    if raw is None:
+        owner = None
+        from app.bot.ai_studio_text_input import get_text_owner
 
-    await redis.delete(_wait_chat_key(max_user_id))
+        owner = await get_text_owner(redis, max_user_id)
+        if not owner or owner[0] != "telegram_chat":
+            return False
+        raw = owner[1]
+
+    await release_text_input(redis, max_user_id, "telegram_chat")
     parts = str(raw).split(":")
     channel_id = int(parts[0])
     source = parts[1] if len(parts) > 1 else "setup"
 
     chat_id = parse_telegram_chat_id(message_text)
     if chat_id is None:
-        await redis.setex(_wait_chat_key(max_user_id), REDIS_TG_TTL, f"{channel_id}:{source}")
+        await claim_text_input(
+            redis,
+            max_user_id,
+            "telegram_chat",
+            f"{channel_id}:{source}",
+            REDIS_TG_TTL,
+        )
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text="Нужен числовой chat\\_id, например `-1004414934235`.",
@@ -147,7 +156,13 @@ async def handle_telegram_chat_id_message(
     )
 
     if result.need_manual_link:
-        await redis.setex(_wait_link_key(max_user_id), REDIS_TG_TTL, f"{channel_id}:{source}")
+        await claim_text_input(
+            redis,
+            max_user_id,
+            "telegram_link",
+            f"{channel_id}:{source}",
+            REDIS_TG_TTL,
+        )
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text="Пришли ссылку `https://t.me/...` или `@username`, либо пропусти.",
@@ -173,13 +188,19 @@ async def handle_telegram_link_message(
     max_client,
     session,
     on_setup_done,
+    owner_payload: str | None = None,
 ) -> bool:
     redis = await get_redis()
-    raw = await redis.get(_wait_link_key(max_user_id))
-    if not raw:
-        return False
+    raw = owner_payload
+    if raw is None:
+        from app.bot.ai_studio_text_input import get_text_owner
 
-    await redis.delete(_wait_link_key(max_user_id))
+        owner = await get_text_owner(redis, max_user_id)
+        if not owner or owner[0] != "telegram_link":
+            return False
+        raw = owner[1]
+
+    await release_text_input(redis, max_user_id, "telegram_link")
     parts = str(raw).split(":")
     channel_id = int(parts[0])
     source = parts[1] if len(parts) > 1 else "setup"
@@ -191,7 +212,13 @@ async def handle_telegram_link_message(
 
     result = await set_telegram_link(channel, message_text, channel_repo=channel_repo)
     if not result.ok:
-        await redis.setex(_wait_link_key(max_user_id), REDIS_TG_TTL, f"{channel_id}:{source}")
+        await claim_text_input(
+            redis,
+            max_user_id,
+            "telegram_link",
+            f"{channel_id}:{source}",
+            REDIS_TG_TTL,
+        )
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=result.message,

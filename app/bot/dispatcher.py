@@ -51,6 +51,9 @@ class UpdateDispatcher:
             try:
                 result = await handler(update)
                 results.append(result)
+                # First consumer wins for DMs — prevents competing text waits.
+                if update_type == UpdateType.MESSAGE_CREATED and result is True:
+                    break
             except Exception as e:
                 logger.exception(f"Error handling update type={update_type}")
                 try:

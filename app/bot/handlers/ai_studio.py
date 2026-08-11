@@ -106,7 +106,7 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                 await max_client.close()
 
     @dispatcher.register(UpdateType.MESSAGE_CREATED)
-    async def on_ai_studio_message(update: dict) -> None:
+    async def on_ai_studio_message(update: dict) -> bool:
         msg = update.get("message", {})
         user_obj = update.get("user", {}) or {}
         sender = msg.get("sender", {}) or {}
@@ -125,23 +125,24 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
         message_text = (msg.get("body") or {}).get("text", "")
 
         if not max_user_id or not message_text:
-            return
+            return False
 
         redis = await get_redis()
 
         if await handle_image_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_video_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_tts_instructions_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_story_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_post_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_topic_queue_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_schedule_message(max_user_id, message_text, redis):
-            return
+            return True
         if await handle_rss_message(max_user_id, message_text, redis):
-            return
+            return True
+        return False

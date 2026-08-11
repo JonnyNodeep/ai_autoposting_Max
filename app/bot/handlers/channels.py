@@ -30,10 +30,6 @@ from app.infrastructure.services.max_client import MaxAPIHTTPClient
 WM_LOGO_WAIT_TTL = 300
 
 
-def _wm_logo_wait_key(user_id: int) -> str:
-    return f"wm_logo_wait:{user_id}"
-
-
 def _extract_image_url_from_message(msg: dict) -> str | None:
     body = msg.get("body") or {}
     attachments = body.get("attachments") or []
@@ -450,17 +446,20 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
 
                 elif callback_data.startswith("channels:tg:skip_link:"):
                     channel_id = int(callback_data.split(":")[3])
+                    from app.bot.ai_studio_text_input import release_text_input
+
                     redis = await get_redis()
-                    await redis.delete(f"tg_bind_link:{max_user_id}")
+                    await release_text_input(redis, max_user_id, "telegram_link")
                     ch = await channel_repo.get_by_id(channel_id)
                     if ch:
                         await show_channel_telegram_card(max_user_id, ch, max_client)
 
                 elif callback_data.startswith("channels:tg:skip:"):
                     channel_id = int(callback_data.split(":")[3])
+                    from app.bot.ai_studio_text_input import clear_text_inputs
+
                     redis = await get_redis()
-                    await redis.delete(f"tg_bind_chat:{max_user_id}")
-                    await redis.delete(f"tg_bind_link:{max_user_id}")
+                    await clear_text_inputs(redis, max_user_id)
                     ch = await channel_repo.get_by_id(channel_id)
                     if ch:
                         await show_channel_telegram_card(max_user_id, ch, max_client)
@@ -500,11 +499,11 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                             text="Нет доступа к этому каналу.",
                         )
                         return
+                    from app.bot.ai_studio_text_input import claim_text_input
+
                     redis = await get_redis()
-                    await redis.setex(
-                        _wm_logo_wait_key(max_user_id),
-                        WM_LOGO_WAIT_TTL,
-                        str(channel_id),
+                    await claim_text_input(
+                        redis, max_user_id, "wm_logo", str(channel_id), WM_LOGO_WAIT_TTL
                     )
                     builder = InlineKeyboardBuilder()
                     builder.row(("Отмена", f"channels:wm_logo:{channel_id}"))
@@ -527,8 +526,10 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                             text="Нет доступа к этому каналу.",
                         )
                         return
+                    from app.bot.ai_studio_text_input import release_text_input
+
                     redis = await get_redis()
-                    await redis.delete(_wm_logo_wait_key(max_user_id))
+                    await release_text_input(redis, max_user_id, "wm_logo")
                     ch = await channel_repo.get_by_id(channel_id)
                     if ch:
                         await show_watermark_logo_screen(max_user_id, ch, max_client)
@@ -545,7 +546,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
             await session.commit()
 
     @dispatcher.register(UpdateType.MESSAGE_CREATED)
-    async def on_wm_logo_upload(update: dict) -> None:
+    async def on_wm_logo_upload(update: dict) -> bool:
         msg = update.get("message", {})
         user_obj = update.get("user", {}) or {}
         sender = msg.get("sender", {}) or {}
@@ -562,29 +563,31 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
         except (TypeError, ValueError):
             max_user_id = None
         if not max_user_id:
-            return
+            return False
+
+        from app.bot.ai_studio_text_input import get_text_owner, release_text_input
 
         redis = await get_redis()
-        raw_ch = await redis.get(_wm_logo_wait_key(max_user_id))
-        if not raw_ch:
-            return
+        owner = await get_text_owner(redis, max_user_id)
+        if not owner or owner[0] != "wm_logo":
+            return False
+        raw_ch = owner[1]
 
         image_url = _extract_image_url_from_message(msg)
         if not image_url:
-            # Let other text handlers run; only nudge if user sent text without image.
             text = ((msg.get("body") or {}).get("text") or "").strip()
             if text:
                 await MaxAPIHTTPClient().send_message_to_user(
                     user_id=max_user_id,
                     text="Нужна картинка (вложение), не текст. Пришли файл логотипа.",
                 )
-            return
+            return True
 
         try:
             channel_id = int(raw_ch)
         except (TypeError, ValueError):
-            await redis.delete(_wm_logo_wait_key(max_user_id))
-            return
+            await release_text_input(redis, max_user_id, "wm_logo")
+            return True
 
         async with async_session_factory() as session:
             user_repo = SQLAlchemyUserRepository(session)
@@ -594,15 +597,15 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 user = await user_repo.get_by_max_user_id(max_user_id)
                 ch = await channel_repo.get_by_id(channel_id)
                 if not user or not ch or ch.owner_id != user.id:
-                    await redis.delete(_wm_logo_wait_key(max_user_id))
+                    await release_text_input(redis, max_user_id, "wm_logo")
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
                         text="Нет доступа к этому каналу.",
                     )
-                    return
+                    return True
                 await save_watermark_logo(ch, channel_repo, image_url)
                 await session.commit()
-                await redis.delete(_wm_logo_wait_key(max_user_id))
+                await release_text_input(redis, max_user_id, "wm_logo")
                 await max_client.send_message_to_user(
                     user_id=max_user_id,
                     text="Логотип для watermark сохранён.",
@@ -620,6 +623,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 )
             finally:
                 await max_client.close()
+        return True
 
 
 async def handle_channels_list(
