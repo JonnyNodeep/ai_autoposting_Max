@@ -1,6 +1,12 @@
+from app.application.auth.feature_access import (
+    rss_allowed,
+    sanitize_premium_blocks,
+    video_allowed,
+)
 from app.bot.ai_studio_text_input import clear_text_inputs
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, IMAGE_MODELS, VIDEO_MODELS
+from app.bot.texts.studio_hints import BLOCKS_MENU_INTRO
 from app.infrastructure.redis.client import get_redis
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
@@ -16,8 +22,9 @@ BLOCK_LABELS = {
     "news_rss": "RSS-новости",
 }
 
-REDIS_TTL = 300
-REVIEW_TTL = 1800
+REDIS_TTL = 1800
+REVIEW_TTL = 3600
+SCHEDULE_SLOTS_TTL = 3600
 
 
 def _model_name(model_id: str) -> str:
@@ -126,6 +133,7 @@ async def handle_entry_callback(
         active_run = await SQLAPipelineRunRepository(session).get_active_by_channel(channel_id)
         if active_run and active_run.blocks_config:
             ui_blocks = steps_to_ui_dict(active_run.blocks_config)
+            ui_blocks = sanitize_premium_blocks(ui_blocks, max_user_id)
             await fsm.set_data(max_user_id, {"blocks": ui_blocks})
             state = await fsm.get_state(max_user_id)
             # Keep per-channel cache aligned with the running config
@@ -196,7 +204,7 @@ async def handle_entry_callback(
                     lines.append(f"⏱ *Промпты слотов:* {', '.join(slot_lines)}")
 
         rss = blocks.get("news_rss") or {}
-        if rss.get("enabled"):
+        if rss.get("enabled") and rss_allowed(max_user_id):
             from app.application.pipeline.rss_monitor import (
                 NICHE_LABELS,
                 format_publish_window_label,
@@ -227,7 +235,7 @@ async def handle_entry_callback(
             lines.append(f"🖼 *Модель:* {_model_name(img_gen.get('model', ''))}")
             lines.append(
                 f"🖼 *Водяной знак:* "
-                f"{'Да' if img_gen.get('add_watermark', True) else 'Нет'}"
+                f"{'Да' if img_gen.get('add_watermark', False) else 'Нет'}"
             )
             lines.append(
                 f"🖼 *Текст на картинке:* "
@@ -258,7 +266,7 @@ async def handle_entry_callback(
             lines.append(f"📝 *Визуальный стиль:* {'Да' if use_vs else 'Нет'}")
 
         video = blocks.get("video_gen", {})
-        if video.get("enabled"):
+        if video.get("enabled") and video_allowed(max_user_id):
             model_name = video.get("model", "")
             for m_id, m_name in VIDEO_MODELS:
                 if m_id == model_name:
@@ -345,7 +353,8 @@ async def _generate_video_prompt(openai_client: OpenAIService, user_description:
     system_prompt = (
         "Ты — профессиональный prompt-инженер для AI-генерации видео из изображения. "
         "Твоя задача — превратить описание движения/анимации от пользователя в детальный, "
-        "эффективный промпт на русском языке для моделей image-to-video (Seedance 1.5 Pro, Wan 2.5)."
+        "эффективный промпт на русском языке для моделей image-to-video "
+        "(Seedance 1.5 Pro, Wan 2.2 Fast, Grok Imagine)."
     )
     user_prompt = (
         f"Создай промпт для анимации изображения на основе этого описания движения:\n\n"
@@ -415,8 +424,16 @@ async def _show_blocks(
 
     await max_client.send_message_to_user(
         user_id=max_user_id,
-        text=f"🤖 *AI Content Studio — {ch_title}*\n\nВыбери блоки для автопостинга:",
-        attachments=[InlineKeyboardBuilder.ai_studio_blocks(blocks, pipeline_active)],
+        text=(
+            f"🤖 *AI Content Studio — {ch_title}*\n\n"
+            f"{BLOCKS_MENU_INTRO}\n\n"
+            "Выбери блок:"
+        ),
+        attachments=[
+            InlineKeyboardBuilder.ai_studio_blocks(
+                blocks, pipeline_active, max_user_id=max_user_id
+            )
+        ],
         fmt="markdown",
     )
 

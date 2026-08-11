@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Пользователь {{ user.id }}{% endblock %}
+{% block content %}
+<h2>{{ user.full_name }} <span class="muted">#{{ user.id }}</span></h2>
+<p class="muted">max_user_id={{ user.max_user_id }} · @{{ user.username or "—" }} · активен={{ user.is_active }}</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Подписка</h3>
+    {% if sub %}
+      <p>{{ sub.tier.value }} · {{ sub.status.value }}</p>
+      <p>Лимит каналов: {{ sub.channels_limit }}</p>
+      <p>Публикаций/день: {{ sub.posts_per_day }}</p>
+      <p>Квота: {{ sub.generations_used }} / {{ sub.generations_quota }} (осталось {{ sub.generations_left }})</p>
+      <p>Истекает: {{ sub.expires_at }}</p>
+      <form method="post" action="/admin/users/{{ user.id }}/extend" class="stack" style="margin-top:1rem">
+        <label>Продлить (дней)
+          <input type="number" name="days" min="1" max="365" value="30" />
+        </label>
+        <button type="submit">Продлить</button>
+      </form>
+      <form method="post" action="/admin/users/{{ user.id }}/plan" class="stack" style="margin-top:1rem">
+        <label>Тариф
+          <select name="tier">
+            {% for t in ["solo", "creator", "studio"] %}
+            <option value="{{ t }}" {% if sub.tier.value == t %}selected{% endif %}>{{ t }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Публикаций/день
+          <select name="posts_per_day">
+            {% for n in [1, 2, 3, 5] %}
+            <option value="{{ n }}" {% if sub.posts_per_day == n %}selected{% endif %}>{{ n }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="row">
+          <input type="checkbox" name="reset_quota" value="1" />
+          Сбросить квоту на posts×30
+        </label>
+        <button type="submit">Сохранить тариф</button>
+      </form>
+    {% else %}
+      <p class="muted">Нет активной подписки</p>
+    {% endif %}
+  </div>
+  <div class="card">
+    <h3>Скидка</h3>
+    <form method="post" action="/admin/users/{{ user.id }}/discount" class="stack">
+      <label>% скидки (0–100)
+        <input type="number" name="discount_percent" min="0" max="100" value="{{ user.discount_percent }}" />
+      </label>
+      <button type="submit">Сохранить скидку</button>
+    </form>
+  </div>
+  <div class="card">
+    <h3>Начислить генерации</h3>
+    <form method="post" action="/admin/users/{{ user.id }}/grant" class="stack">
+      <label>Дельта (+/−)
+        <input type="number" name="delta" value="30" required />
+      </label>
+      <label>Причина
+        <input type="text" name="reason" value="начисление админом" required />
+      </label>
+      <button type="submit">Начислить</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Каналы ({{ channels|length }})</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Название</th><th>Активен</th></tr></thead>
+    <tbody>
+      {% for ch in channels %}
+      <tr><td>{{ ch.id }}</td><td>{{ ch.title }}</td><td>{{ ch.is_active }}</td></tr>
+      {% else %}
+      <tr><td colspan="3" class="muted">Нет</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Недавние платежи</h3>
+  <table>
+    <thead><tr><th>ID</th><th>Сумма</th><th>Скидка</th><th>Тариф</th><th>Тип</th><th>Статус</th><th>Когда</th></tr></thead>
+    <tbody>
+      {% for p in payments %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td>{{ p.amount }}₽{% if p.discount_percent %} <span class="muted">(было {{ p.amount_before_discount }})</span>{% endif %}</td>
+        <td>{{ p.discount_percent }}%</td>
+        <td>{{ p.tier }} / {{ p.posts_per_day }}</td>
+        <td>{{ p.kind.value }}</td>
+        <td>{{ p.status.value }}</td>
+        <td>{{ p.created_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">Нет</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Аудит (недавние)</h3>
+  <table>
+    <thead><tr><th>Когда</th><th>Действие</th><th>Кто</th><th>Данные</th></tr></thead>
+    <tbody>
+      {% for a in audits %}
+      <tr>
+        <td>{{ a.created_at }}</td>
+        <td>{{ a.action }}</td>
+        <td>{{ a.actor }}</td>
+        <td><code>{{ a.payload }}</code></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Нет</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p><a href="/admin/users">← Назад</a></p>
+{% endblock %}

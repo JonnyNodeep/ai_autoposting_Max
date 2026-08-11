@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 from loguru import logger
 
@@ -89,6 +88,8 @@ class GenerateLogoUseCase:
         self._max_client = max_client
 
     async def execute(self, channel_id: int) -> str:
+        from app.application.channels.watermark_logo import save_watermark_logo
+
         channel = await self._channel_repo.get_by_id(channel_id)
         if not channel:
             raise ValueError(f"Channel {channel_id} not found")
@@ -105,21 +106,16 @@ class GenerateLogoUseCase:
             logger.error(f"Logo generation returned empty result for channel {channel_id}")
             return ""
 
-        if result.startswith("http://") or result.startswith("https://"):
-            channel.logo_token = result
-        elif self._max_client:
-            token = await self._max_client.upload_file(result, "image")
-            channel.logo_token = token
-            try:
-                Path(result).unlink(missing_ok=True)
-            except Exception:
-                logger.warning(f"Failed to cleanup logo file={result}")
+        path = await save_watermark_logo(channel, self._channel_repo, result)
+        if self._max_client:
+            channel.logo_token = await self._max_client.upload_file(path, "image")
         else:
-            channel.logo_token = result
-
+            channel.logo_token = path
         await self._channel_repo.update(channel)
-        logger.info(f"Logo generated and saved for channel {channel_id}")
-        return channel.logo_token
+        logger.info(
+            f"Logo generated and saved for channel {channel_id} path={channel.logo_path}"
+        )
+        return channel.logo_token or ""
 
 
 class AnalyzeVisualStyleUseCase:

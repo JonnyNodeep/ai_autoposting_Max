@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Дашборд{% endblock %}
+{% block content %}
+<h2>Дашборд</h2>
+<div class="grid">
+  <div class="card stat"><div class="label">Пользователи (активные)</div><div class="value">{{ stats.total_users }}</div></div>
+  <div class="card stat"><div class="label">Подписки</div><div class="value">{{ stats.active_subscriptions }}</div></div>
+  <div class="card stat"><div class="label">Слоты беты</div><div class="value">{{ beta_used }}{% if max_users %}/{{ max_users }}{% else %}/∞{% endif %}</div></div>
+  <div class="card stat"><div class="label">Выручка (месяц)</div><div class="value">{{ stats.month_revenue }}₽</div></div>
+  <div class="card stat"><div class="label">Платежи (месяц)</div><div class="value">{{ stats.month_payments }}</div></div>
+  <div class="card stat"><div class="label">Каналы</div><div class="value">{{ stats.total_channels }}</div></div>
+</div>
+<div class="card">
+  <div class="muted">По тарифам — Solo {{ stats.by_tier.solo }} · Creator {{ stats.by_tier.creator }} · Studio {{ stats.by_tier.studio }}</div>
+</div>
+{% endblock %}

@@ -4,6 +4,8 @@ from typing import Any
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
+from app.application.auth.feature_access import sanitize_premium_blocks_config
+from app.application.billing.quota import subscription_allows_publish
 from app.application.pipeline.normalize import normalize_blocks_config, ui_dict_to_v2
 from app.application.pipeline.rss_monitor import (
     baseline_mark,
@@ -13,6 +15,9 @@ from app.application.pipeline.rss_monitor import (
 from app.domain.entities.pipeline_run import PipelineRun, PipelineStatus
 from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 from app.infrastructure.repositories.rss_seen_repository import SQLARssSeenRepository
+from app.infrastructure.repositories.subscription_repository import (
+    SQLAlchemySubscriptionRepository,
+)
 from app.infrastructure.scheduler.service import scheduler_service
 
 
@@ -21,9 +26,11 @@ class PipelineManager:
         self,
         repo: SQLAPipelineRunRepository,
         rss_repo: SQLARssSeenRepository | None = None,
+        subscription_repo: SQLAlchemySubscriptionRepository | None = None,
     ) -> None:
         self._repo = repo
         self._rss_repo = rss_repo
+        self._subscription_repo = subscription_repo
 
     async def start(
         self,
@@ -35,6 +42,10 @@ class PipelineManager:
         frequency: str,
         times: list[str],
     ) -> PipelineRun:
+        if self._subscription_repo is not None:
+            sub = await self._subscription_repo.get_active_by_user(user_id)
+            subscription_allows_publish(sub, max_user_id=max_user_id)
+
         await self._stop_all_active(channel_id)
 
         stored = (
@@ -42,6 +53,7 @@ class PipelineManager:
             if blocks_config.get("version") != 2
             else normalize_blocks_config(blocks_config)
         )
+        stored = sanitize_premium_blocks_config(stored, max_user_id)
         news = normalize_news_rss(stored.get("news_rss"))
         rss_mode = is_rss_trigger(stored)
 
@@ -146,16 +158,19 @@ class PipelineManager:
         self,
         channel_id: int,
         blocks_config: dict[str, Any],
+        max_user_id: int | None = None,
     ) -> PipelineRun | None:
         run = await self._repo.get_active_by_channel(channel_id)
         if not run or not run.id:
             return None
 
+        owner_id = max_user_id if max_user_id is not None else run.max_user_id
         stored = (
             ui_dict_to_v2(blocks_config)
             if blocks_config.get("version") != 2
             else normalize_blocks_config(blocks_config)
         )
+        stored = sanitize_premium_blocks_config(stored, owner_id)
         news = normalize_news_rss(stored.get("news_rss"))
         schedule = stored.get("schedule") or {}
         times = list(schedule.get("times") or [])

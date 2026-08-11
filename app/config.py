@@ -1,7 +1,7 @@
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class AppSettings(BaseSettings):
@@ -53,8 +53,18 @@ class OpenAISettings(BaseSettings):
     admin_api_key: str = Field(default="", alias="OPENAI_ADMIN_API_KEY")
     text_model: str = Field(default="gpt-5.5-mini", alias="OPENAI_TEXT_MODEL")
     image_model: str = Field(default="imagen-1.5", alias="OPENAI_IMAGE_MODEL")
+    image_quality: str = Field(default="medium", alias="OPENAI_IMAGE_QUALITY")
     search_model: str = Field(default="gpt-4o-mini-search-preview", alias="OPENAI_SEARCH_MODEL")
-    tts_model: str = Field(default="tts-1-hd", alias="OPENAI_TTS_MODEL")
+    tts_model: str = Field(default="gpt-4o-mini-tts", alias="OPENAI_TTS_MODEL")
+
+    @field_validator("image_quality")
+    @classmethod
+    def validate_image_quality(cls, value: str) -> str:
+        allowed = {"low", "medium", "high"}
+        normalized = (value or "medium").strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"OPENAI_IMAGE_QUALITY must be one of: {sorted(allowed)}")
+        return normalized
 
 
 class YooKassaSettings(BaseSettings):
@@ -69,6 +79,8 @@ class AdminSettings(BaseSettings):
 
     max_user_id: int = Field(default=0, alias="ADMIN_MAX_USER_ID")
     api_token: str = Field(default="", alias="ADMIN_API_TOKEN")
+    web_password: str = Field(default="", alias="ADMIN_WEB_PASSWORD")
+    session_secret: str = Field(default="", alias="ADMIN_SESSION_SECRET")
 
 
 class VidGoSettings(BaseSettings):
@@ -85,6 +97,28 @@ class TelegramSettings(BaseSettings):
     token: str = Field(default="", alias="TELEGRAM_TOKEN")
 
 
+class YandexSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    folder_id: str = Field(default="", alias="YANDEX_FOLDER_ID")
+    speechkit_api_key: str = Field(default="", alias="YANDEX_SPEECHKIT_API_KEY")
+    tts_proxy: str = Field(default="", alias="YANDEX_TTS_PROXY")
+
+
+class RssSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    http_proxy: str = Field(default="", alias="RSS_HTTP_PROXY")
+
+
+class FeatureSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    rss_whitelist: str = Field(default="", alias="FEATURE_RSS_WHITELIST")
+    video_whitelist: str = Field(default="", alias="FEATURE_VIDEO_WHITELIST")
+    audio_whitelist: str = Field(default="", alias="FEATURE_AUDIO_WHITELIST")
+
+
 class Settings(BaseSettings):
     app: AppSettings = AppSettings()
     postgres: PostgresSettings = PostgresSettings()
@@ -95,6 +129,9 @@ class Settings(BaseSettings):
     admin: AdminSettings = AdminSettings()
     vidgo: VidGoSettings = VidGoSettings()
     telegram: TelegramSettings = TelegramSettings()
+    yandex: YandexSettings = YandexSettings()
+    rss: RssSettings = RssSettings()
+    features: FeatureSettings = FeatureSettings()
 
 
 @lru_cache

@@ -7,12 +7,13 @@ from datetime import datetime, timedelta, UTC
 from email.utils import parsedate_to_datetime
 from time import struct_time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import feedparser
 import httpx
 from loguru import logger
 
+from app.config import settings
 from app.domain.entities.rss_seen_item import RssSeenItem
 from app.infrastructure.repositories.rss_seen_repository import SQLARssSeenRepository
 
@@ -231,7 +232,8 @@ def normalize_news_rss(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         data["max_age_hours"] = 24
     try:
-        data["max_posts_per_hour"] = max(1, int(raw.get("max_posts_per_hour", 3)))
+        # 0 = unlimited (no hourly cap)
+        data["max_posts_per_hour"] = max(0, int(raw.get("max_posts_per_hour", 3)))
     except (TypeError, ValueError):
         data["max_posts_per_hour"] = 3
     data["publish_from_msk"] = parse_hhmm(
@@ -380,27 +382,187 @@ def extract_og_image(html: str, *, page_url: str = "") -> str | None:
     return None
 
 
+def _rss_http_proxy() -> str | None:
+    return (settings.rss.http_proxy or "").strip() or None
+
+
+_RSS_UA = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+_RETRYABLE = (httpx.ConnectTimeout, httpx.ConnectError, httpx.ProxyError, httpx.ReadTimeout)
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAMS = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "yclid",
+        "mc_cid",
+        "mc_eid",
+        "_openstat",
+        "ysclid",
+    }
+)
+
+
+def normalize_item_url(url: str) -> str:
+    """Canonicalize article URL for dedup (host case, slash, tracking params)."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return raw.split("#")[0].strip()
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    pairs = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        low = key.casefold()
+        if low in _TRACKING_PARAMS or any(low.startswith(p) for p in _TRACKING_PARAM_PREFIXES):
+            continue
+        pairs.append((key, value))
+    query = urlencode(pairs)
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def title_dedup_key(title: str) -> str:
+    """Normalize title for cross-source duplicate detection."""
+    text = (title or "").casefold()
+    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:120]
+
+
+def _is_vk_url(url: str) -> bool:
+    host = (urlparse(url).netloc or "").casefold()
+    if host.startswith("www."):
+        host = host[4:]
+    return host in ("vk.com", "vk.ru", "m.vk.com", "m.vk.ru") or host.endswith(
+        (".vk.com", ".vk.ru")
+    )
+
+
+def _is_ssl_verify_error(exc: BaseException) -> bool:
+    msg = str(exc).casefold()
+    if "certificate" in msg or "ssl" in msg:
+        return True
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, BaseException):
+        return _is_ssl_verify_error(cause)
+    return False
+
+
+def _http_client(timeout: float, *, verify: bool = True) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        proxy=_rss_http_proxy(),
+        verify=verify,
+        headers=_RSS_UA,
+    )
+
+
+async def _http_get_with_retry(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    attempts: int = 3,
+) -> httpx.Response:
+    """GET with retries for flaky Beget proxy / network blips."""
+    import asyncio
+
+    last_exc: Exception | None = None
+    use_verify = True
+    ssl_soft_retried = False
+    attempt = 0
+    while attempt < attempts:
+        attempt += 1
+        try:
+            async with _http_client(timeout, verify=use_verify) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                return resp
+        except Exception as exc:
+            if use_verify and _is_ssl_verify_error(exc) and not ssl_soft_retried:
+                ssl_soft_retried = True
+                use_verify = False
+                logger.warning(
+                    f"RSS SSL verify failed, retrying insecure url={url}: {exc}"
+                )
+                attempt -= 1  # do not consume a normal attempt for SSL soft retry
+                continue
+            if isinstance(exc, _RETRYABLE):
+                last_exc = exc
+                logger.warning(
+                    f"RSS HTTP connect failed attempt={attempt}/{attempts} url={url}: {exc}"
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(1.5 * attempt)
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
+
+
+_OG_DESC_RE = re.compile(
+    r"""<meta[^>]+(?:property|name)=["'](?:og:description|description)["'][^>]+content=["']([^"']+)["']""",
+    re.IGNORECASE,
+)
+_OG_DESC_RE_ALT = re.compile(
+    r"""<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:description|description)["']""",
+    re.IGNORECASE,
+)
+
+
+def extract_og_description(html: str) -> str | None:
+    for pattern in (_OG_DESC_RE, _OG_DESC_RE_ALT):
+        match = pattern.search(html or "")
+        if not match:
+            continue
+        text = re.sub(r"\s+", " ", match.group(1)).strip()
+        if len(text) >= 20:
+            return text[:1500]
+    return None
+
+
 async def resolve_article_image(item: RssNewsItem, *, timeout: float = 15.0) -> str | None:
     """Use feed image if present; else one GET of article page for og:image."""
-    if item.image_url and _looks_like_image_url(item.image_url):
-        return item.image_url
-    page = (item.url or "").strip()
+    enriched = await enrich_news_item(item, timeout=timeout)
+    return enriched.image_url
+
+
+async def enrich_news_item(item: RssNewsItem, *, timeout: float = 15.0) -> RssNewsItem:
+    """Fill image_url / summary from article page when missing."""
+    need_image = not (item.image_url and _looks_like_image_url(item.image_url))
+    need_summary = not (item.summary or "").strip()
+    if not need_image and not need_summary:
+        return item
+    page = normalize_item_url(item.url) or (item.url or "").strip()
     if not page.startswith("http"):
-        return None
+        return item
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(
-                page,
-                headers={"User-Agent": "AI-Content-Studio-RSS/1.0"},
-            )
-            resp.raise_for_status()
-            html = resp.content.decode("utf-8", errors="ignore")
-            found = extract_og_image(html, page_url=str(resp.url))
+        resp = await _http_get_with_retry(page, timeout=timeout)
+        html = resp.content.decode("utf-8", errors="ignore")
+        page_url = str(resp.url)
+        if need_image:
+            found = extract_og_image(html, page_url=page_url)
             if found:
-                return found
+                item.image_url = found
+        if need_summary:
+            desc = extract_og_description(html)
+            if desc:
+                item.summary = desc
     except Exception as e:
-        logger.warning(f"Article image enrich failed url={page}: {e}")
-    return None
+        logger.warning(f"Article enrich failed url={page}: {e}")
+    return item
 
 
 def parse_feed_bytes(content: bytes, feed_url: str) -> list[RssNewsItem]:
@@ -408,10 +570,18 @@ def parse_feed_bytes(content: bytes, feed_url: str) -> list[RssNewsItem]:
     items: list[RssNewsItem] = []
     for entry in parsed.entries or []:
         title = (getattr(entry, "title", None) or "").strip()
-        link = (getattr(entry, "link", None) or "").strip()
-        guid = (
+        link = normalize_item_url(
+            (getattr(entry, "link", None) or "").strip()
+        )
+        raw_guid = (
             getattr(entry, "id", None) or getattr(entry, "guid", None) or link or title
-        ).strip()
+        )
+        guid = str(raw_guid).strip()
+        if link and (not guid or guid == title):
+            guid = link
+        elif link:
+            # keep feed guid but prefer normalized link for url field
+            pass
         if not guid:
             continue
         raw_summary = getattr(entry, "summary", None) or getattr(entry, "description", None) or ""
@@ -435,15 +605,15 @@ def parse_feed_bytes(content: bytes, feed_url: str) -> list[RssNewsItem]:
     return items
 
 
-async def fetch_feed(url: str, *, timeout: float = 20.0) -> list[RssNewsItem]:
+async def fetch_feed(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    attempts: int = 3,
+) -> list[RssNewsItem]:
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(
-                url,
-                headers={"User-Agent": "AI-Content-Studio-RSS/1.0"},
-            )
-            resp.raise_for_status()
-            return parse_feed_bytes(resp.content, url)
+        resp = await _http_get_with_retry(url, timeout=timeout, attempts=attempts)
+        return parse_feed_bytes(resp.content, url)
     except Exception as e:
         logger.warning(f"RSS fetch failed url={url}: {e}")
         return []
@@ -466,9 +636,11 @@ _FEED_TYPE_RE = re.compile(
 )
 _FEED_HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.IGNORECASE)
 _COMMON_FEED_PATHS = ("/rss", "/feed", "/atom.xml", "/rss.xml", "/feeds/posts/default")
+_LISTING_FALLBACK_PATHS = ("/news/", "/novosti/", "/news", "/novosti")
 _ARTICLE_PATH_HINTS = (
     "/news/",
     "/novosti/",
+    "/new/",
     "/article/",
     "/articles/",
     "/post/",
@@ -476,6 +648,8 @@ _ARTICLE_PATH_HINTS = (
     "/story/",
     "/stories/",
     "/publication/",
+    "/material/",
+    "/materials/",
 )
 _SKIP_PATH_HINTS = (
     "/tag/",
@@ -490,8 +664,38 @@ _SKIP_PATH_HINTS = (
     "/search",
     "/cart",
     "/account",
+    "/rss",
+    "/feed",
+    "/atom",
+    "/feeds/",
 )
 _DATE_IN_PATH_RE = re.compile(r"/(?:19|20)\d{2}/(?:0?[1-9]|1[0-2])/")
+_FULL_DATE_IN_PATH_RE = re.compile(
+    r"/(?P<year>(?:19|20)\d{2})/(?P<month>0?[1-9]|1[0-2])/(?P<day>0?[1-9]|[12]\d|3[01])(?:/|$)"
+)
+_NUMERIC_ARTICLE_RE = re.compile(
+    r"/(?:news|novosti|new|article|articles|post|posts|story|material)s?/(\d{3,})(?:/|$)",
+    re.IGNORECASE,
+)
+_LONG_NUMERIC_ID_RE = re.compile(r"/\d{5,}(?:/|$)")
+
+
+def infer_published_at_from_url(url: str) -> datetime | None:
+    """Parse YYYY/MM/DD from article path (e.g. lenta.ru/news/2022/08/02/...)."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    path = urlparse(raw).path or raw
+    match = _FULL_DATE_IN_PATH_RE.search(path)
+    if not match:
+        return None
+    try:
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+        return datetime(year, month, day, tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -577,10 +781,21 @@ def parse_html_listing(html: str, site_url: str, *, limit: int = 40) -> list[Rss
         if any(s in path_l for s in _SKIP_PATH_HINTS):
             continue
         # Drop bare section roots like /news/
-        if path.rstrip("/") in ("", "/news", "/novosti", "/articles", "/posts"):
+        if path.rstrip("/") in (
+            "",
+            "/news",
+            "/novosti",
+            "/articles",
+            "/posts",
+            "/new",
+            "/materials",
+        ):
             continue
-        hint_ok = any(h in path_l for h in _ARTICLE_PATH_HINTS) or bool(
-            _DATE_IN_PATH_RE.search(path)
+        hint_ok = (
+            any(h in path_l for h in _ARTICLE_PATH_HINTS)
+            or bool(_DATE_IN_PATH_RE.search(path))
+            or bool(_NUMERIC_ARTICLE_RE.search(path))
+            or bool(_LONG_NUMERIC_ID_RE.search(path))
         )
         text_ok = len(text) >= 18
         if not (hint_ok or text_ok):
@@ -588,8 +803,8 @@ def parse_html_listing(html: str, site_url: str, *, limit: int = 40) -> list[Rss
         # Prefer paths with some depth
         if path.count("/") < 2 and not hint_ok:
             continue
-        clean = abs_url.split("#")[0]
-        if clean in seen:
+        clean = normalize_item_url(abs_url)
+        if not clean or clean in seen:
             continue
         seen.add(clean)
         title = text if len(text) >= 8 else clean.rstrip("/").rsplit("/", 1)[-1]
@@ -608,25 +823,43 @@ def parse_html_listing(html: str, site_url: str, *, limit: int = 40) -> list[Rss
     return items
 
 
-async def _fetch_page_bytes(url: str, *, timeout: float = 20.0) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(
-            url,
-            headers={"User-Agent": "AI-Content-Studio-RSS/1.0"},
-        )
-        resp.raise_for_status()
-        final_url = str(resp.url)
-        return resp.content, final_url
+async def _fetch_page_bytes(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    attempts: int = 3,
+) -> tuple[bytes, str]:
+    resp = await _http_get_with_retry(url, timeout=timeout, attempts=attempts)
+    return resp.content, str(resp.url)
+
+
+async def _try_fetch_page(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    attempts: int = 3,
+) -> tuple[bytes, str] | None:
+    try:
+        return await _fetch_page_bytes(url, timeout=timeout, attempts=attempts)
+    except Exception as e:
+        logger.warning(f"Site fetch failed url={url}: {e}")
+        return None
+
+
+def _site_origin(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc
+    return f"{scheme}://{netloc}" if netloc else url
 
 
 async def probe_common_feed_paths(base_url: str) -> list[str]:
-    """Try well-known feed paths under the site origin."""
-    parsed = urlparse(base_url)
-    origin = f"{parsed.scheme}://{parsed.netloc}"
+    """Try well-known feed paths under the site origin (single attempt each)."""
+    origin = _site_origin(base_url)
     working: list[str] = []
     for path in _COMMON_FEED_PATHS:
         candidate = origin + path
-        items = await fetch_feed(candidate)
+        items = await fetch_feed(candidate, attempts=1)
         if items:
             working.append(candidate)
     return working
@@ -634,61 +867,102 @@ async def probe_common_feed_paths(base_url: str) -> list[str]:
 
 async def find_working_feed_for_site(site_url: str) -> tuple[str | None, list[RssNewsItem], bytes]:
     """Return (feed_url, items, page_html_bytes) — feed_url None if only HTML remains."""
-    try:
-        content, final_url = await _fetch_page_bytes(site_url)
-    except Exception as e:
-        logger.warning(f"Site fetch failed url={site_url}: {e}")
-        return None, [], b""
+    content = b""
+    final_url = site_url
 
-    # Page itself might already be a feed
-    direct = parse_feed_bytes(content, final_url)
-    if direct:
-        return final_url, direct, content
+    primary = await _try_fetch_page(site_url, attempts=3)
+    if primary:
+        content, final_url = primary
+        direct = parse_feed_bytes(content, final_url)
+        if direct:
+            return final_url, direct, content
+    else:
+        origin = _site_origin(site_url)
+        for path in _LISTING_FALLBACK_PATHS:
+            candidate = origin + path
+            if normalize_item_url(candidate) == normalize_item_url(site_url):
+                continue
+            alt = await _try_fetch_page(candidate, attempts=1)
+            if alt:
+                content, final_url = alt
+                direct = parse_feed_bytes(content, final_url)
+                if direct:
+                    return final_url, direct, content
+                break
 
     html = ""
-    try:
-        html = content.decode("utf-8", errors="ignore")
-    except Exception:
-        html = ""
+    if content:
+        try:
+            html = content.decode("utf-8", errors="ignore")
+        except Exception:
+            html = ""
 
-    candidates = discover_feed_urls(final_url, html)
-    for path_feed in await probe_common_feed_paths(final_url):
+    candidates: list[str] = []
+    if html:
+        candidates.extend(discover_feed_urls(final_url, html))
+    for path_feed in await probe_common_feed_paths(final_url or site_url):
         if path_feed not in candidates:
             candidates.append(path_feed)
 
     for feed_url in candidates:
-        items = await fetch_feed(feed_url)
+        items = await fetch_feed(feed_url, attempts=1)
         if items:
             return feed_url, items, content
 
     return None, [], content
 
 
+async def _listing_from_html_or_fallbacks(
+    site_url: str,
+    content: bytes,
+    *,
+    final_url: str = "",
+) -> list[RssNewsItem]:
+    html = ""
+    try:
+        html = content.decode("utf-8", errors="ignore") if content else ""
+    except Exception:
+        html = ""
+    base = final_url or site_url
+    if html:
+        listing = parse_html_listing(html, base)
+        if listing:
+            return listing
+
+    origin = _site_origin(site_url)
+    tried = {normalize_item_url(base), normalize_item_url(site_url)}
+    for path in _LISTING_FALLBACK_PATHS:
+        candidate = origin + path
+        if normalize_item_url(candidate) in tried:
+            continue
+        tried.add(normalize_item_url(candidate))
+        got = await _try_fetch_page(candidate, attempts=1)
+        if not got:
+            continue
+        page_bytes, page_url = got
+        try:
+            page_html = page_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        listing = parse_html_listing(page_html, page_url)
+        if listing:
+            return listing
+    return []
+
+
 async def resolve_site_to_items(site_url: str) -> list[RssNewsItem]:
     feed_url, feed_items, content = await find_working_feed_for_site(site_url)
     if feed_url and feed_items:
         return feed_items
-    html = ""
-    try:
-        html = content.decode("utf-8", errors="ignore")
-    except Exception:
-        html = ""
-    if not html and content:
-        return []
-    if not html:
-        try:
-            content2, final = await _fetch_page_bytes(site_url)
-            html = content2.decode("utf-8", errors="ignore")
-            site_url = final
-        except Exception as e:
-            logger.warning(f"Site HTML refetch failed url={site_url}: {e}")
-            return []
-    return parse_html_listing(html, site_url)
+    return await _listing_from_html_or_fallbacks(site_url, content)
 
 
 async def fetch_all_sites(sites: list[str]) -> list[RssNewsItem]:
     items: list[RssNewsItem] = []
     for url in sites:
+        if _is_vk_url(url):
+            logger.warning(f"Skipping unsupported VK site url={url}")
+            continue
         try:
             items.extend(await resolve_site_to_items(url))
         except Exception as e:
@@ -698,6 +972,16 @@ async def fetch_all_sites(sites: list[str]) -> list[RssNewsItem]:
 
 async def resolve_site_add(site_url: str) -> SiteAddResult:
     """On user add: prefer RSS feed URL in feeds; else keep as HTML site source."""
+    if _is_vk_url(site_url):
+        return SiteAddResult(
+            mode="site",
+            stored_url=site_url,
+            item_count=0,
+            message=(
+                "VK-сообщества пока не поддерживаются как источник. "
+                "Добавь сайт СМИ или прямую RSS-ссылку."
+            ),
+        )
     feed_url, feed_items, content = await find_working_feed_for_site(site_url)
     if feed_url and feed_items:
         return SiteAddResult(
@@ -708,12 +992,7 @@ async def resolve_site_add(site_url: str) -> SiteAddResult:
                 f"Нашёл RSS, добавил ленту ({len(feed_items)} записей):\n`{feed_url}`"
             ),
         )
-    html = ""
-    try:
-        html = content.decode("utf-8", errors="ignore")
-    except Exception:
-        html = ""
-    listing = parse_html_listing(html, site_url) if html else []
+    listing = await _listing_from_html_or_fallbacks(site_url, content)
     if listing:
         return SiteAddResult(
             mode="site",
@@ -753,21 +1032,41 @@ def filter_new_items(
     max_age_hours: int,
     include_keywords: list[str] | None = None,
     exclude_keywords: list[str] | None = None,
+    seen_titles: set[str] | None = None,
     now: datetime | None = None,
 ) -> list[RssNewsItem]:
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(hours=max_age_hours)
     include = list(include_keywords or [])
     exclude = list(exclude_keywords or [])
+    title_seen = set(seen_titles or [])
     out: list[RssNewsItem] = []
     local_guids: set[str] = set()
     local_urls: set[str] = set()
+    local_titles: set[str] = set()
     for item in items:
-        if item.guid in seen_guids or item.guid in local_guids:
+        norm_url = normalize_item_url(item.url) if item.url else ""
+        if norm_url:
+            item.url = norm_url
+            if item.guid == item.url or not item.guid:
+                item.guid = norm_url
+        guid = item.guid
+        if guid in seen_guids or guid in local_guids:
+            continue
+        if norm_url and (norm_url in seen_urls or norm_url in local_urls):
             continue
         if item.url and (item.url in seen_urls or item.url in local_urls):
             continue
-        if item.published_at is not None and item.published_at < cutoff:
+        tkey = title_dedup_key(item.title)
+        if tkey and (tkey in title_seen or tkey in local_titles):
+            continue
+        if item.published_at is None:
+            inferred = infer_published_at_from_url(norm_url or item.url or "")
+            if inferred is not None:
+                item.published_at = inferred
+        if item.published_at is None:
+            continue
+        if item.published_at < cutoff:
             continue
         hay = item.haystack()
         if exclude and _matches_any(hay, exclude):
@@ -775,9 +1074,13 @@ def filter_new_items(
         if include and not _matches_any(hay, include):
             continue
         out.append(item)
-        local_guids.add(item.guid)
+        local_guids.add(guid)
+        if norm_url:
+            local_urls.add(norm_url)
         if item.url:
             local_urls.add(item.url)
+        if tkey:
+            local_titles.add(tkey)
     out.sort(
         key=lambda x: x.published_at or datetime.min.replace(tzinfo=UTC),
         reverse=True,
@@ -787,6 +1090,28 @@ def filter_new_items(
 
 def pick_next(items: list[RssNewsItem]) -> RssNewsItem | None:
     return items[0] if items else None
+
+
+def _seen_row_from_item(
+    it: RssNewsItem,
+    *,
+    channel_id: int,
+    pipeline_run_id: int | None,
+) -> RssSeenItem:
+    norm_url = normalize_item_url(it.url) if it.url else (it.url or "")
+    guid = it.guid
+    if norm_url and (not guid or guid == it.url):
+        guid = norm_url
+    return RssSeenItem(
+        channel_id=channel_id,
+        pipeline_run_id=pipeline_run_id,
+        feed_url=it.feed_url,
+        item_guid=guid,
+        item_url=norm_url,
+        title=it.title,
+        published_at=it.published_at,
+        processed_at=datetime.now(UTC),
+    )
 
 
 async def baseline_mark(
@@ -799,16 +1124,7 @@ async def baseline_mark(
     items = await fetch_all_feeds(feeds)
     items.extend(await fetch_all_sites(list(sites or [])))
     seen_rows = [
-        RssSeenItem(
-            channel_id=channel_id,
-            pipeline_run_id=None,
-            feed_url=it.feed_url,
-            item_guid=it.guid,
-            item_url=it.url,
-            title=it.title,
-            published_at=it.published_at,
-            processed_at=datetime.now(UTC),
-        )
+        _seen_row_from_item(it, channel_id=channel_id, pipeline_run_id=None)
         for it in items
     ]
     count = await repo.mark_many(seen_rows)
@@ -834,11 +1150,19 @@ async def collect_new_for_channel(
         return []
     raw_items = await fetch_all_feeds(feeds)
     raw_items.extend(await fetch_all_sites(sites))
-    guids, urls = await repo.get_seen_guids_and_urls(channel_id)
+    guids, urls, titles = await repo.get_seen_keys(channel_id)
+    seen_urls: set[str] = set()
+    for u in urls:
+        if not u:
+            continue
+        seen_urls.add(u)
+        seen_urls.add(normalize_item_url(u))
+    seen_titles = {title_dedup_key(t) for t in titles if title_dedup_key(t)}
     return filter_new_items(
         raw_items,
         seen_guids=guids,
-        seen_urls=urls,
+        seen_urls=seen_urls,
+        seen_titles=seen_titles,
         max_age_hours=int(cfg["max_age_hours"]),
         include_keywords=list(cfg["include_keywords"]),
         exclude_keywords=list(cfg["exclude_keywords"]),
@@ -853,6 +1177,8 @@ async def rate_limit_allows(
     max_posts_per_hour: int,
     now: datetime | None = None,
 ) -> bool:
+    if max_posts_per_hour <= 0:
+        return True
     now = now or datetime.now(UTC)
     since = now - timedelta(hours=1)
     count = await repo.count_published_since(channel_id, since)

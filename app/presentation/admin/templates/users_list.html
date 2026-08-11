@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Пользователи{% endblock %}
+{% block content %}
+<h2>Пользователи</h2>
+<form method="get" class="row card">
+  <input type="search" name="q" value="{{ q }}" placeholder="id / username / имя" />
+  <button type="submit">Найти</button>
+</form>
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>MAX</th><th>Имя</th><th>Скидка</th><th>Активен</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.id }}</td>
+        <td>{{ u.max_user_id }}</td>
+        <td>{{ u.full_name }} {% if u.username %}<span class="muted">@{{ u.username }}</span>{% endif %}</td>
+        <td>{% if u.discount_percent %}{{ u.discount_percent }}%{% else %}—{% endif %}</td>
+        <td>{{ "да" if u.is_active else "нет" }}</td>
+        <td><a href="/admin/users/{{ u.id }}">Открыть</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Нет пользователей</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="row muted" style="margin-top:1rem">
+    {% if page > 1 %}<a href="?q={{ q }}&page={{ page - 1 }}">Назад</a>{% endif %}
+    Стр. {{ page }} / {{ pages }} ({{ total }})
+    {% if page < pages %}<a href="?q={{ q }}&page={{ page + 1 }}">Далее</a>{% endif %}
+  </div>
+</div>
+{% endblock %}

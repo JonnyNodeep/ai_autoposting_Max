@@ -2,6 +2,7 @@ import json
 
 from loguru import logger
 
+from app.application.auth.feature_access import premium_invite_message, video_allowed
 from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, VIDEO_MODELS
@@ -23,6 +24,21 @@ from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
 
 
 async def handle_video_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
+    is_video_cb = (
+        callback_data.startswith("ai:edit:video_gen")
+        or callback_data.startswith("ai:block:video_gen:")
+        or callback_data.startswith("ai:video_gen:")
+    )
+    if not is_video_cb:
+        return False
+    if not video_allowed(max_user_id):
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=premium_invite_message("Видео"),
+            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+        )
+        return True
+
     if callback_data.startswith("ai:edit:video_gen"):
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -62,13 +78,21 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
         defaults = {
             "seedance-1.5-pro": {
                 "duration": 4,
-                "resolution": "480p",
+                "resolution": "720p",
                 "aspect_ratio": "9:16",
                 "fixed_lens": False,
                 "generate_audio": False,
-                "fallback_model": "wan2.5-image-to-video",
+                "fallback_model": "wan2.2-image-to-video-fast",
             },
-            "wan2.5-image-to-video": {"duration": 5, "resolution": "720p"},
+            "wan2.2-image-to-video-fast": {
+                "resolution": "720p",
+                "fallback_model": "wan2.2-image-to-video-fast",
+            },
+            "grok-imagine": {
+                "duration": 6,
+                "mode": "normal",
+                "fallback_model": "wan2.2-image-to-video-fast",
+            },
         }
         block_data = {"model": model_id}
         block_data.update(defaults.get(model_id, {}))
@@ -249,6 +273,9 @@ async def handle_video_message(max_user_id: int, message_text: str, redis) -> bo
     video_wait_data = await redis.get(video_wait_key)
     if not video_wait_data:
         return False
+    if not video_allowed(max_user_id):
+        await redis.delete(video_wait_key)
+        return False
 
     video_mode = video_wait_data.decode() if isinstance(video_wait_data, bytes) else video_wait_data
     await redis.delete(video_wait_key)
@@ -375,41 +402,24 @@ async def _run_video_test(
             text=f"📥 Скачиваю видео и загружаю в MAX...",
         )
 
-        import tempfile
         import httpx
+        import uuid
         from pathlib import Path
 
-        tmp_path = None
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
-                dl_response = await dl_client.get(video_url)
-                dl_response.raise_for_status()
+        from app.infrastructure.services.openai_client import UPLOAD_DIR
 
-            suffix = Path(video_url).suffix or ".mp4"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(dl_response.content)
-                tmp_path = f.name
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
+            dl_response = await dl_client.get(video_url)
+            dl_response.raise_for_status()
 
-            logger.info(f"AI Studio test: video downloaded to {tmp_path}")
+        suffix = Path(video_url).suffix or ".mp4"
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        local_path = UPLOAD_DIR / f"video_{uuid.uuid4().hex[:12]}{suffix}"
+        local_path.write_bytes(dl_response.content)
+        logger.info(f"AI Studio test: video saved to {local_path}")
 
-            if channel_link:
-                from app.infrastructure.services.openai_client import _apply_video_watermark
-                slug = channel_link.rstrip("/").split("/")[-1]
-                watermarked = str(Path(tmp_path).parent / f"wm_{Path(tmp_path).name}")
-                _apply_video_watermark(tmp_path, watermarked, slug)
-                Path(tmp_path).unlink()
-                tmp_path = watermarked
-                logger.info(f"AI Studio test: watermark applied, slug={slug}")
-
-            max_token = await max_client.upload_file(tmp_path, "video")
-            logger.info(f"AI Studio test: video uploaded to MAX, token={max_token[:40]}")
-
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink()
-                except Exception:
-                    pass
+        max_token = await max_client.upload_file(str(local_path), "video")
+        logger.info(f"AI Studio test: video uploaded to MAX, token={max_token[:40]}")
 
         return max_token
 

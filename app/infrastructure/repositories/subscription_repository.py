@@ -33,6 +33,12 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
             tier=subscription.tier.value,
             status=subscription.status.value,
             channels_limit=subscription.channels_limit,
+            posts_per_day=subscription.posts_per_day,
+            generations_quota=subscription.generations_quota,
+            generations_used=subscription.generations_used,
+            expiry_notified_3d=subscription.expiry_notified_3d,
+            expiry_notified_1d=subscription.expiry_notified_1d,
+            expiry_notified_0d=subscription.expiry_notified_0d,
             expires_at=subscription.expires_at,
         )
         self._session.add(model)
@@ -48,6 +54,12 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
                 tier=subscription.tier.value,
                 status=subscription.status.value,
                 channels_limit=subscription.channels_limit,
+                posts_per_day=subscription.posts_per_day,
+                generations_quota=subscription.generations_quota,
+                generations_used=subscription.generations_used,
+                expiry_notified_3d=subscription.expiry_notified_3d,
+                expiry_notified_1d=subscription.expiry_notified_1d,
+                expiry_notified_0d=subscription.expiry_notified_0d,
                 expires_at=subscription.expires_at,
             )
         )
@@ -70,6 +82,12 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
             tier=SubscriptionTier(model.tier),
             status=SubscriptionStatus(model.status),
             channels_limit=model.channels_limit,
+            posts_per_day=getattr(model, "posts_per_day", 1) or 1,
+            generations_quota=getattr(model, "generations_quota", 30) or 30,
+            generations_used=getattr(model, "generations_used", 0) or 0,
+            expiry_notified_3d=bool(getattr(model, "expiry_notified_3d", False)),
+            expiry_notified_1d=bool(getattr(model, "expiry_notified_1d", False)),
+            expiry_notified_0d=bool(getattr(model, "expiry_notified_0d", False)),
             started_at=model.started_at,
             expires_at=model.expires_at,
         )

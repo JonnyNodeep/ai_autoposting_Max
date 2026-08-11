@@ -18,6 +18,7 @@ class ChannelModel(Base):
     style_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     sample_posts: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     logo_token: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    logo_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_frequency: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

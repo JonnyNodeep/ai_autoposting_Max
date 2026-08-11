@@ -11,6 +11,8 @@ from app.infrastructure.models import (
     ContentPlanModel, ContentTopicModel, ContentPostModel,
     PublishScheduleModel, PaymentModel, GenerationLogModel,
     PipelineRunModel, RssSeenItemModel,
+    AppSettingModel, WaitlistEntryModel, AdminAuditLogModel,
+    BroadcastModel, BroadcastDeliveryModel, ReferralRewardModel,
 )  # noqa: F401
 
 config = context.config

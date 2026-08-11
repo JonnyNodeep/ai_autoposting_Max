@@ -10,7 +10,7 @@ class SubscriptionTier(StrEnum):
     def channels_limit(self) -> int:
         limits = {
             SubscriptionTier.SOLO: 1,
-            SubscriptionTier.CREATOR: 3,
+            SubscriptionTier.CREATOR: 5,
             SubscriptionTier.STUDIO: 10,
         }
         return limits[self]

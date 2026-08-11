@@ -16,6 +16,7 @@ class Channel:
     style_profile: StyleProfile = field(default_factory=StyleProfile)
     sample_posts: list[str] = field(default_factory=list)
     logo_token: str | None = None
+    logo_path: str | None = None
     content_frequency: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     is_active: bool = True

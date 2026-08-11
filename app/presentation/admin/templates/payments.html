@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Платежи{% endblock %}
+{% block content %}
+<h2>Платежи</h2>
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Пользователь</th><th>Сумма</th><th>Скидка</th><th>Тариф</th><th>Тип</th><th>Статус</th><th>Когда</th></tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.payment.id }}</td>
+        <td><a href="/admin/users/{{ row.payment.user_id }}">{{ row.payment.user_id }}</a>
+          {% if row.user %}<span class="muted">{{ row.user.full_name }}</span>{% endif %}
+        </td>
+        <td>{{ row.payment.amount }}₽</td>
+        <td>{{ row.payment.discount_percent }}%{% if row.payment.discount_percent %} ({{ row.payment.amount_before_discount }}){% endif %}</td>
+        <td>{{ row.payment.tier }}/{{ row.payment.posts_per_day }}</td>
+        <td>{{ row.payment.kind.value }}</td>
+        <td>{{ row.payment.status.value }}</td>
+        <td>{{ row.payment.created_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="muted">Нет платежей</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

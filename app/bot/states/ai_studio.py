@@ -4,6 +4,23 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from app.application.pipeline.tts_instructions import (
+    DEFAULT_TTS_INSTRUCTIONS,
+    DEFAULT_TTS_INSTRUCTIONS_PRESET,
+    TTS_INSTRUCTION_PRESET_LABELS,
+    TTS_INSTRUCTION_PRESETS,
+)
+from app.application.pipeline.tts_voices import (
+    DEFAULT_SPEECHKIT_ROLE,
+    DEFAULT_SPEECHKIT_SPEED,
+    DEFAULT_SPEECHKIT_VOICE,
+    DEFAULT_TTS_PROVIDER,
+    OPENAI_TTS_VOICES,
+)
+
+# Back-compat alias used by keyboards / older imports
+TTS_VOICES = OPENAI_TTS_VOICES
+
 from app.infrastructure.redis.client import get_redis
 
 
@@ -20,21 +37,12 @@ IMAGE_MODELS = [
 ]
 
 VIDEO_MODELS = [
-    ("seedance-1.5-pro", "Seedance 1.5 Pro — 480p, 4s"),
-    ("wan2.5-image-to-video", "Wan 2.5 — 720p, 5s"),
+    ("seedance-1.5-pro", "Seedance 1.5 Pro — 720p, 4s (~16 cr)"),
+    ("wan2.2-image-to-video-fast", "Wan 2.2 Fast — 720p (~12 cr)"),
+    ("grok-imagine", "Grok Imagine (~30 cr)"),
 ]
 
-TTS_VOICES = [
-    ("shimmer", "Shimmer"),
-    ("nova", "Nova"),
-    ("sage", "Sage"),
-    ("echo", "Echo"),
-    ("onyx", "Onyx"),
-    ("alloy", "Alloy"),
-    ("ash", "Ash"),
-    ("coral", "Coral"),
-    ("fable", "Fable"),
-]
+TTS_VOICES = OPENAI_TTS_VOICES
 
 DEFAULT_BLOCKS = {
     "story_gen": {
@@ -51,7 +59,7 @@ DEFAULT_BLOCKS = {
     "image_gen": {
         "enabled": False,
         "model": IMAGE_MODELS[0][0],
-        "add_watermark": True,
+        "add_watermark": False,
         "allow_text": True,
     },
     "image_prompt": {
@@ -67,21 +75,25 @@ DEFAULT_BLOCKS = {
         "model": VIDEO_MODELS[0][0],
         "duration": 4,
         "mode": "normal",
-        "resolution": "480p",
+        "resolution": "720p",
         "aspect_ratio": "9:16",
         "fixed_lens": False,
         "generate_audio": False,
-        "fallback_model": "wan2.5-image-to-video",
+        "fallback_model": "wan2.2-image-to-video-fast",
         "prompt_mode": "ai",
         "user_description": "",
         "generated_prompt": "",
     },
     "tts_gen": {
         "enabled": False,
-        "model": "tts-1-hd",
-        "voice": "shimmer",
-        "speed": 0.85,
+        "provider": DEFAULT_TTS_PROVIDER,
+        "model": "gpt-4o-mini-tts",
+        "voice": DEFAULT_SPEECHKIT_VOICE,
+        "speed": DEFAULT_SPEECHKIT_SPEED,
+        "role": DEFAULT_SPEECHKIT_ROLE,
         "response_format": "mp3",
+        "instructions": DEFAULT_TTS_INSTRUCTIONS,
+        "instructions_preset": DEFAULT_TTS_INSTRUCTIONS_PRESET,
     },
     "post_gen": {
         "enabled": False,

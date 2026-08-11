@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from app.application.pipeline.context import PipelineContext
+from app.infrastructure.services.openai_client import UPLOAD_DIR
 
 
 def _escape_md(text: str) -> str:
     for ch in ("\\", "*", "_", "[", "]", "(", ")", "`"):
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+SHARE_CTA_AUDIO = (
+    "\n\nПоделитесь с друзьями — пусть и у них будет добрая сказка перед сном"
+)
 
 
 def build_subscribe_cta(
@@ -23,6 +32,17 @@ def build_subscribe_cta(
     if personalized:
         return f"\n\n**👉 [Подпишись на {_escape_md(title)}]({link})**"
     return f"\n\n**👉 [Подпишись на канал]({link})**"
+
+
+def build_share_cta_audio(post_text: str) -> str:
+    """Append share CTA for audio fairy-tale posts unless already present."""
+    body = (post_text or "").rstrip()
+    if not body:
+        return body
+    lower = body.lower()
+    if "поделит" in lower or "поделись" in lower:
+        return body
+    return body + SHARE_CTA_AUDIO
 
 
 def text_with_telegram_cta(
@@ -49,15 +69,105 @@ def text_with_telegram_cta(
     )
 
 
-async def _build_image_attachment(ctx: PipelineContext) -> dict[str, Any] | None:
-    if not (ctx.image_url or "").strip():
+def _wants_logo_watermark(ctx: PipelineContext) -> bool:
+    if not bool(ctx.meta.get("add_watermark")):
+        return False
+    logo = ""
+    if ctx.channel is not None:
+        logo = (getattr(ctx.channel, "logo_path", None) or "").strip()
+    if not logo:
+        logger.warning(
+            f"add_watermark=True but no logo_path "
+            f"channel_id={getattr(ctx.channel, 'id', None)} run_id={ctx.run_id}"
+        )
+        return False
+    if not Path(logo).is_file():
+        logger.warning(
+            f"add_watermark=True but logo file missing path={logo} "
+            f"channel_id={getattr(ctx.channel, 'id', None)} run_id={ctx.run_id}"
+        )
+        return False
+    return True
+
+
+def _logo_path(ctx: PipelineContext) -> str:
+    return (getattr(ctx.channel, "logo_path", None) or "").strip()
+
+
+async def _local_image_path(ctx: PipelineContext) -> str | None:
+    """Resolve ctx.image_url to a local file path (download HTTP URLs to temp)."""
+    raw = (ctx.image_url or "").strip()
+    if not raw:
         return None
-    if ctx.image_url.startswith("http://") or ctx.image_url.startswith("https://"):
-        payload: dict[str, Any] = {"url": ctx.image_url}
-    else:
-        token = await ctx.max_client.upload_file(ctx.image_url, "image")
-        payload = {"token": token}
-    return {"type": "image", "payload": payload}
+    if raw.startswith("http://") or raw.startswith("https://"):
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            resp = await client.get(raw)
+            resp.raise_for_status()
+        suffix = Path(raw.split("?", 1)[0]).suffix or ".jpg"
+        if suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            suffix = ".jpg"
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        dest = UPLOAD_DIR / f"wm_src_{uuid.uuid4().hex[:12]}{suffix}"
+        dest.write_bytes(resp.content)
+        return str(dest)
+    if Path(raw).is_file():
+        return raw
+    return None
+
+
+def _watermark_image_to_temp(src: str, logo: str) -> str:
+    from app.infrastructure.services.media_watermark import apply_logo_image
+
+    dest = Path(tempfile.gettempdir()) / f"wm_img_{uuid.uuid4().hex[:12]}.png"
+    return apply_logo_image(src, logo, str(dest))
+
+
+def _watermark_video_to_temp(src: str, logo: str) -> str:
+    from app.infrastructure.services.media_watermark import apply_logo_video
+
+    suffix = Path(src).suffix or ".mp4"
+    dest = Path(tempfile.gettempdir()) / f"wm_vid_{uuid.uuid4().hex[:12]}{suffix}"
+    return apply_logo_video(src, logo, str(dest))
+
+
+async def _attachment_from_image_path(
+    ctx: PipelineContext, path_or_url: str
+) -> dict[str, Any] | None:
+    raw = (path_or_url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return {"type": "image", "payload": {"url": raw}}
+    token = await ctx.max_client.upload_file(raw, "image")
+    return {"type": "image", "payload": {"token": token}}
+
+
+async def _video_token_for_delivery(
+    ctx: PipelineContext,
+    *,
+    temp_files: list[str],
+) -> str | None:
+    local = (ctx.video_local_path or "").strip()
+    publish = local
+    if _wants_logo_watermark(ctx) and local and Path(local).is_file():
+        try:
+            publish = _watermark_video_to_temp(local, _logo_path(ctx))
+            temp_files.append(publish)
+        except Exception:
+            logger.exception(
+                f"Video logo watermark failed run_id={ctx.run_id}; publishing clean"
+            )
+            publish = local
+    if publish and (
+        publish != local or not (ctx.video_token or "").strip()
+    ):
+        return await ctx.max_client.upload_file(publish, "video")
+    token = (ctx.video_token or "").strip()
+    if token:
+        return token
+    if publish and Path(publish).is_file():
+        return await ctx.max_client.upload_file(publish, "video")
+    return None
 
 
 async def _build_audio_attachment(ctx: PipelineContext) -> dict[str, Any] | None:
@@ -75,6 +185,8 @@ async def _mirror_to_telegram(
     post_text: str,
     *,
     prefer_audio_with_image: bool = False,
+    image_path: str | None = None,
+    video_path: str | None = None,
 ) -> None:
     """Best-effort dual-publish. Never raises — Max post already succeeded."""
     if ctx.target != "channel":
@@ -87,12 +199,11 @@ async def _mirror_to_telegram(
     if tg is None or not getattr(tg, "configured", True):
         return
     try:
-        video_path = (ctx.video_local_path or "").strip() or None
         audio_path = (ctx.audio_local_path or "").strip() or None
-        image_url = (ctx.image_url or "").strip() or None
+        image_url = image_path if image_path is not None else ((ctx.image_url or "").strip() or None)
+        vid = video_path if video_path is not None else ((ctx.video_local_path or "").strip() or None)
 
-        if prefer_audio_with_image and image_url and audio_path and not video_path:
-            # Mirror as two messages: photo+caption, then audio.
+        if prefer_audio_with_image and image_url and audio_path and not vid:
             await tg.publish_post(
                 tg_chat_id,
                 post_text[:4096],
@@ -109,7 +220,7 @@ async def _mirror_to_telegram(
             )
             return
 
-        if video_path:
+        if vid:
             image_url = None
         elif audio_path:
             image_url = None
@@ -117,7 +228,7 @@ async def _mirror_to_telegram(
             tg_chat_id,
             post_text[:4096],
             image_url=image_url,
-            video_path=video_path,
+            video_path=vid,
             audio_path=audio_path,
         )
         logger.info(
@@ -129,42 +240,6 @@ async def _mirror_to_telegram(
             f"Telegram mirror failed channel_id={getattr(channel, 'id', None)} "
             f"tg_chat={tg_chat_id} — Max post kept"
         )
-
-
-def _cleanup_path(path: str, label: str) -> None:
-    if not path:
-        return
-    try:
-        Path(path).unlink(missing_ok=True)
-    except Exception:
-        logger.warning(f"Failed to cleanup {label}={path}")
-
-
-def _cleanup_video_local(ctx: PipelineContext) -> None:
-    path = (ctx.video_local_path or "").strip()
-    _cleanup_path(path, "video_local_path")
-    ctx.video_local_path = ""
-
-
-def _cleanup_audio_local(ctx: PipelineContext) -> None:
-    path = (ctx.audio_local_path or "").strip()
-    _cleanup_path(path, "audio_local_path")
-    ctx.audio_local_path = ""
-
-
-def _cleanup_image_local(ctx: PipelineContext) -> None:
-    """Remove generated local image after MAX/TG no longer need the file."""
-    path = (ctx.image_url or "").strip()
-    if not path or path.startswith("http://") or path.startswith("https://"):
-        return
-    _cleanup_path(path, "image_url")
-    ctx.image_url = ""
-
-
-def _cleanup_local_media(ctx: PipelineContext) -> None:
-    _cleanup_video_local(ctx)
-    _cleanup_audio_local(ctx)
-    _cleanup_image_local(ctx)
 
 
 async def _send_max(
@@ -193,33 +268,68 @@ async def _send_max(
     )
 
 
+def _cleanup_temps(paths: list[str]) -> None:
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class PostGenBlock:
     type_id = "post_gen"
 
     async def execute(self, ctx: PipelineContext, config: dict[str, Any]) -> None:
+        temp_files: list[str] = []
+        try:
+            await self._execute(ctx, config, temp_files=temp_files)
+        finally:
+            _cleanup_temps(temp_files)
+
+    async def _execute(
+        self,
+        ctx: PipelineContext,
+        config: dict[str, Any],
+        *,
+        temp_files: list[str],
+    ) -> None:
         if not config.get("enabled"):
-            # Legacy test: if only video was produced, still deliver video to user
-            if ctx.target == "user" and ctx.video_token and ctx.target_user_id is not None:
-                await ctx.max_client.send_message_to_user(
-                    user_id=ctx.target_user_id,
-                    text="🎬",
-                    attachments=[{"type": "video", "payload": {"token": ctx.video_token}}],
-                    fmt="markdown",
-                )
-            _cleanup_local_media(ctx)
+            if ctx.target == "user" and (
+                ctx.video_token or (ctx.video_local_path or "").strip()
+            ) and ctx.target_user_id is not None:
+                token = await _video_token_for_delivery(ctx, temp_files=temp_files)
+                if token:
+                    await ctx.max_client.send_message_to_user(
+                        user_id=ctx.target_user_id,
+                        text="🎬",
+                        attachments=[{"type": "video", "payload": {"token": token}}],
+                        fmt="markdown",
+                    )
             return
 
         post_text = (ctx.post_text or "").strip() or (config.get("generated_post") or "").strip()
         if not post_text:
-            if ctx.target == "user" and ctx.video_token and ctx.target_user_id is not None:
-                await ctx.max_client.send_message_to_user(
-                    user_id=ctx.target_user_id,
-                    text="🎬",
-                    attachments=[{"type": "video", "payload": {"token": ctx.video_token}}],
-                    fmt="markdown",
-                )
-            _cleanup_local_media(ctx)
+            if ctx.target == "user" and (
+                ctx.video_token or (ctx.video_local_path or "").strip()
+            ) and ctx.target_user_id is not None:
+                token = await _video_token_for_delivery(ctx, temp_files=temp_files)
+                if token:
+                    await ctx.max_client.send_message_to_user(
+                        user_id=ctx.target_user_id,
+                        text="🎬",
+                        attachments=[{"type": "video", "payload": {"token": token}}],
+                        fmt="markdown",
+                    )
             return
+
+        has_video = bool(
+            (ctx.video_token or "").strip() or (ctx.video_local_path or "").strip()
+        )
+        has_audio = bool(ctx.audio_token or (ctx.audio_local_path or "").strip())
+        has_image = bool((ctx.image_url or "").strip())
+
+        if has_audio:
+            post_text = build_share_cta_audio(post_text)
 
         body_without_cta = post_text
         add_link = bool(config.get("add_channel_link") and ctx.channel_link)
@@ -231,60 +341,114 @@ class PostGenBlock:
             )
 
         ctx.post_text = post_text
-        has_video = bool(ctx.video_token)
-        has_audio = bool(ctx.audio_token or (ctx.audio_local_path or "").strip())
-        has_image = bool((ctx.image_url or "").strip())
 
-        try:
-            if has_video:
-                attachments = [{"type": "video", "payload": {"token": ctx.video_token}}]
-                await _send_max(ctx, post_text, attachments)
-            elif has_audio and has_image:
-                # MAX docs don't list audio+image combo — send two messages.
-                image_att = await _build_image_attachment(ctx)
-                await _send_max(
-                    ctx,
-                    post_text,
-                    [image_att] if image_att else None,
-                )
-                audio_att = await _build_audio_attachment(ctx)
-                await _send_max(
-                    ctx,
-                    "🎙",
-                    [audio_att] if audio_att else None,
-                )
-            elif has_audio:
-                audio_att = await _build_audio_attachment(ctx)
-                await _send_max(
-                    ctx,
-                    post_text,
-                    [audio_att] if audio_att else None,
-                )
-            elif has_image:
-                image_att = await _build_image_attachment(ctx)
-                await _send_max(
-                    ctx,
-                    post_text,
-                    [image_att] if image_att else None,
-                )
+        publish_image: str | None = None
+        publish_video: str | None = None
+
+        if has_video:
+            local_video = (ctx.video_local_path or "").strip()
+            if _wants_logo_watermark(ctx) and local_video and Path(local_video).is_file():
+                try:
+                    publish_video = _watermark_video_to_temp(local_video, _logo_path(ctx))
+                    temp_files.append(publish_video)
+                except Exception:
+                    logger.exception(
+                        f"Video logo watermark failed run_id={ctx.run_id}; "
+                        f"publishing clean"
+                    )
+                    publish_video = local_video or None
             else:
-                await _send_max(ctx, post_text, None)
+                publish_video = local_video or None
 
-            if ctx.target == "channel":
-                tg_text = text_with_telegram_cta(
-                    post_text,
-                    body_without_cta=body_without_cta,
-                    add_channel_link=add_link,
-                    max_link=ctx.channel_link or "",
-                    telegram_link=getattr(ctx.channel, "telegram_link", None),
-                    channel_title=ctx.channel_title or "канал",
-                    personalized=False,
-                )
-                await _mirror_to_telegram(
+            token = (ctx.video_token or "").strip()
+            if publish_video and (
+                publish_video != local_video or not token
+            ):
+                token = await ctx.max_client.upload_file(publish_video, "video")
+            if token:
+                await _send_max(
                     ctx,
-                    tg_text,
-                    prefer_audio_with_image=bool(has_audio and has_image and not has_video),
+                    post_text,
+                    [{"type": "video", "payload": {"token": token}}],
                 )
-        finally:
-            # After MAX upload + optional TG mirror — drop local media files.
-            _cleanup_local_media(ctx)
+        elif has_audio and has_image:
+            if _wants_logo_watermark(ctx):
+                try:
+                    local = await _local_image_path(ctx)
+                    if local:
+                        if local != (ctx.image_url or "").strip():
+                            temp_files.append(local)
+                        publish_image = _watermark_image_to_temp(local, _logo_path(ctx))
+                        temp_files.append(publish_image)
+                except Exception:
+                    logger.exception(
+                        f"Image logo watermark failed run_id={ctx.run_id}; "
+                        f"publishing clean"
+                    )
+            image_att = await _attachment_from_image_path(
+                ctx, publish_image or (ctx.image_url or "").strip()
+            )
+            await _send_max(
+                ctx,
+                post_text,
+                [image_att] if image_att else None,
+            )
+            audio_att = await _build_audio_attachment(ctx)
+            await _send_max(
+                ctx,
+                "🎙",
+                [audio_att] if audio_att else None,
+            )
+            if publish_image is None:
+                publish_image = (ctx.image_url or "").strip() or None
+        elif has_audio:
+            audio_att = await _build_audio_attachment(ctx)
+            await _send_max(
+                ctx,
+                post_text,
+                [audio_att] if audio_att else None,
+            )
+        elif has_image:
+            if _wants_logo_watermark(ctx):
+                try:
+                    local = await _local_image_path(ctx)
+                    if local:
+                        if local != (ctx.image_url or "").strip():
+                            temp_files.append(local)
+                        publish_image = _watermark_image_to_temp(local, _logo_path(ctx))
+                        temp_files.append(publish_image)
+                except Exception:
+                    logger.exception(
+                        f"Image logo watermark failed run_id={ctx.run_id}; "
+                        f"publishing clean"
+                    )
+            image_att = await _attachment_from_image_path(
+                ctx, publish_image or (ctx.image_url or "").strip()
+            )
+            await _send_max(
+                ctx,
+                post_text,
+                [image_att] if image_att else None,
+            )
+            if publish_image is None:
+                publish_image = (ctx.image_url or "").strip() or None
+        else:
+            await _send_max(ctx, post_text, None)
+
+        if ctx.target == "channel":
+            tg_text = text_with_telegram_cta(
+                post_text,
+                body_without_cta=body_without_cta,
+                add_channel_link=add_link,
+                max_link=ctx.channel_link or "",
+                telegram_link=getattr(ctx.channel, "telegram_link", None),
+                channel_title=ctx.channel_title or "канал",
+                personalized=False,
+            )
+            await _mirror_to_telegram(
+                ctx,
+                tg_text,
+                prefer_audio_with_image=bool(has_audio and has_image and not has_video),
+                image_path=publish_image,
+                video_path=publish_video,
+            )

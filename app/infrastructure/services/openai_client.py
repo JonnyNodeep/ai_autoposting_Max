@@ -10,7 +10,6 @@ from app.domain.interfaces.openai_client import OpenAIClient
 from loguru import logger
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
-WATERMARK_SCALE = 3 / 5
 
 
 class OpenAIService(OpenAIClient):
@@ -18,6 +17,7 @@ class OpenAIService(OpenAIClient):
         self._client = AsyncOpenAI(api_key=settings.openai.api_key)
         self._text_model = settings.openai.text_model
         self._image_model = settings.openai.image_model
+        self._image_quality = settings.openai.image_quality
 
     async def generate_text(
         self, prompt: str, system_prompt: str | None = None
@@ -34,12 +34,13 @@ class OpenAIService(OpenAIClient):
         )
         return response.choices[0].message.content or ""
 
-    async def generate_image(self, prompt: str, channel_link: str | None = None) -> str:
+    async def generate_image(self, prompt: str) -> str:
         response = await self._client.images.generate(
             model=self._image_model,
             prompt=prompt,
             n=1,
             size="1024x1024",
+            quality=self._image_quality,
         )
         image_data = response.data[0]
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,8 +50,6 @@ class OpenAIService(OpenAIClient):
         if image_data.b64_json:
             filepath.write_bytes(base64.b64decode(image_data.b64_json))
         elif image_data.url:
-            if not channel_link:
-                return image_data.url
             import httpx
 
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -60,10 +59,6 @@ class OpenAIService(OpenAIClient):
         else:
             return ""
 
-        if channel_link:
-            slug = channel_link.rstrip("/").split("/")[-1]
-            if slug:
-                _apply_watermark(str(filepath), slug)
         return str(filepath)
 
     async def analyze_vision(self, prompt: str, base64_images: list[str]) -> str:
@@ -122,17 +117,29 @@ class OpenAIService(OpenAIClient):
         voice: str = "shimmer",
         speed: float = 0.85,
         response_format: str = "mp3",
+        instructions: str | None = None,
     ) -> str:
-        from app.application.pipeline.tts_chunking import chunk_tts_text, concat_mp3_files
+        from app.application.pipeline.tts_chunking import (
+            chunk_tts_text,
+            concat_audio_to_mp3,
+            max_chars_for_model,
+        )
 
         script = (text or "").strip()
         if not script:
             raise ValueError("Empty text for speech generation")
 
-        tts_model = (model or settings.openai.tts_model or "tts-1-hd").strip()
+        tts_model = (model or settings.openai.tts_model or "gpt-4o-mini-tts").strip()
         speed_val = max(0.25, min(4.0, float(speed)))
-        fmt = (response_format or "mp3").strip() or "mp3"
-        chunks = chunk_tts_text(script)
+        # Always request lossless WAV from API; deliver MP3 320k for publish.
+        # response_format arg kept for API compat but ignored for delivery.
+        _ = response_format
+        api_fmt = "wav"
+        style = (instructions or "").strip() or None
+        use_instructions = bool(style) and (
+            tts_model.startswith("gpt-4o-mini-tts") or "mini-tts" in tts_model.lower()
+        )
+        chunks = chunk_tts_text(script, max_chars=max_chars_for_model(tts_model))
         if not chunks:
             raise ValueError("Empty text for speech generation")
 
@@ -140,26 +147,25 @@ class OpenAIService(OpenAIClient):
         part_paths: list[Path] = []
         try:
             for i, chunk in enumerate(chunks):
-                response = await self._client.audio.speech.create(
-                    model=tts_model,
-                    voice=voice,
-                    input=chunk,
-                    response_format=fmt,
-                    speed=speed_val,
-                )
-                part_path = UPLOAD_DIR / f"tts_part_{uuid.uuid4().hex[:12]}_{i}.{fmt}"
+                kwargs: dict = {
+                    "model": tts_model,
+                    "voice": voice,
+                    "input": chunk,
+                    "response_format": api_fmt,
+                    "speed": speed_val,
+                }
+                if use_instructions:
+                    kwargs["instructions"] = style
+                response = await self._client.audio.speech.create(**kwargs)
+                part_path = UPLOAD_DIR / f"tts_part_{uuid.uuid4().hex[:12]}_{i}.{api_fmt}"
                 part_path.write_bytes(response.content)
                 part_paths.append(part_path)
 
-            out_path = UPLOAD_DIR / f"tts_{uuid.uuid4().hex[:12]}.{fmt}"
-            if len(part_paths) == 1:
-                part_paths[0].rename(out_path)
-                part_paths = []
-            else:
-                concat_mp3_files(part_paths, out_path)
+            out_path = UPLOAD_DIR / f"tts_{uuid.uuid4().hex[:12]}.mp3"
+            concat_audio_to_mp3(part_paths, out_path)
             logger.info(
                 f"TTS done model={tts_model} voice={voice} "
-                f"chunks={len(chunks)} path={out_path}"
+                f"chunks={len(chunks)} api=wav deliver=mp3_320k path={out_path}"
             )
             return str(out_path)
         finally:
@@ -168,55 +174,3 @@ class OpenAIService(OpenAIClient):
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
-
-
-def _apply_watermark(filepath: str, slug: str) -> None:
-    from PIL import Image, ImageDraw, ImageFont
-    img = Image.open(filepath).convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    try:
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            72 * WATERMARK_SCALE,
-        )
-    except OSError:
-        font = ImageFont.load_default()
-    bbox = draw.textbbox((0, 0), slug, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    margin = 30 * WATERMARK_SCALE
-    pad_x = 15 * WATERMARK_SCALE
-    pad_y = 10 * WATERMARK_SCALE
-    x = img.width - tw - margin
-    y = img.height - th - margin
-    draw.rectangle([x - pad_x, y - pad_y, x + tw + pad_x, y + th + pad_y], fill=(0, 0, 0, 100))
-    draw.text((x, y), slug, font=font, fill=(255, 255, 255, 200))
-    combined = Image.alpha_composite(img, overlay)
-    combined.save(filepath, "PNG")
-
-
-def _apply_video_watermark(input_path: str, output_path: str, slug: str) -> None:
-    import subprocess
-
-    escaped = slug.replace(":", "\\:").replace("'", "\\'")
-    drawtext = (
-        f"drawtext=text='{escaped}':"
-        f"fontsize=9:"
-        f"fontcolor=white@0.8:"
-        f"box=1:boxcolor=black@0.4:boxborderw=5:"
-        f"x=w-tw-10:y=h-th-10"
-    )
-
-    result = subprocess.run(
-        [
-            "ffmpeg", "-i", input_path,
-            "-vf", drawtext,
-            "-codec:a", "copy",
-            "-y", output_path,
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        logger.error(f"ffmpeg watermark failed: {result.stderr[:300]}")
-        raise RuntimeError(f"Video watermark failed")
-    logger.info(f"Video watermarked: {input_path} -> {output_path}")

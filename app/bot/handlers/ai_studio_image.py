@@ -17,6 +17,7 @@ from app.bot.handlers.ai_studio_entry import (
     _show_blocks,
 )
 from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
+from app.bot.texts.studio_hints import IMAGE_GEN_INTRO
 
 
 async def handle_image_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
@@ -40,7 +41,8 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                f"🖼 *Генерация изображений — выбор модели*\n\n"
+                f"🖼 *Картинки к посту — выбор модели*\n\n"
+                f"{IMAGE_GEN_INTRO}\n\n"
                 f"Текущая: {_model_name(current_model)}"
             ),
             attachments=[InlineKeyboardBuilder.ai_image_model_select(current_model)],
@@ -63,9 +65,9 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
             user_id=max_user_id,
             text=(
                 "🖼 *Генерация изображений*\n\n"
-                "Добавлять водяной знак (slug канала) на картинку?\n\n"
-                "Если в пайплайне включено видео — watermark всё равно "
-                "пойдёт только на видео, без двойного slug."
+                "Добавлять водяной знак (логотип канала) при публикации?\n\n"
+                "Файлы в uploads остаются чистыми; логотип "
+                "накладывается только на медиа в канал / тест."
             ),
             attachments=[InlineKeyboardBuilder.ai_image_watermark_toggle()],
             fmt="markdown",

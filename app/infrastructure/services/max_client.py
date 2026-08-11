@@ -59,9 +59,11 @@ class MaxAPIHTTPClient(MaxAPIClient):
     async def close(self) -> None:
         await self._client.aclose()
 
+    # Large audio (~15–20 MB fairy tales) can take several minutes for MAX to process.
+    # Keep retrying attachment.not.ready long enough before giving up.
     @retry(
-        stop=stop_after_attempt(8),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(20),
+        wait=wait_exponential(multiplier=2, min=3, max=60),
         retry=retry_if_exception(_is_retryable_max_error),
         reraise=True,
     )

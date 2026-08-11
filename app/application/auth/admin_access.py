@@ -35,6 +35,9 @@ def format_channels_quota(used: int, limit: int | None) -> str:
     return f"{used} из {limit}"
 
 
+ADMIN_GENERATIONS_QUOTA = 1_000_000
+
+
 async def ensure_admin_subscription(subscription_repo, user_id: int) -> Subscription:
     """Give admin unlimited channels and non-expiring active subscription."""
     sub = await subscription_repo.get_active_by_user(user_id)
@@ -45,6 +48,9 @@ async def ensure_admin_subscription(subscription_repo, user_id: int) -> Subscrip
                 tier=SubscriptionTier.STUDIO,
                 status=SubscriptionStatus.ACTIVE,
                 channels_limit=ADMIN_CHANNELS_LIMIT,
+                posts_per_day=5,
+                generations_quota=ADMIN_GENERATIONS_QUOTA,
+                generations_used=0,
                 expires_at=ADMIN_EXPIRES_AT,
             )
         )
@@ -61,6 +67,9 @@ async def ensure_admin_subscription(subscription_repo, user_id: int) -> Subscrip
         changed = True
     if sub.tier != SubscriptionTier.STUDIO:
         sub.tier = SubscriptionTier.STUDIO
+        changed = True
+    if sub.generations_quota < ADMIN_GENERATIONS_QUOTA:
+        sub.generations_quota = ADMIN_GENERATIONS_QUOTA
         changed = True
     if changed:
         await subscription_repo.update(sub)

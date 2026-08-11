@@ -12,9 +12,81 @@ from app.application.pipeline.topic_queue import pop_topic
 
 _CHARS_PER_MINUTE = 950  # ~at TTS speed 0.85 wall-clock
 
+_JSON_FIELD_RE = re.compile(
+    r'"(caption|story)"\s*:\s*"((?:[^"\\]|\\.)*)"',
+    re.DOTALL,
+)
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _unescape_json_string(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        return (
+            value.replace(r"\"", '"')
+            .replace(r"\n", "\n")
+            .replace(r"\t", "\t")
+            .replace(r"\\", "\\")
+        )
+
+
+def _looks_like_json_blob(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    head = t[:80].lstrip()
+    if head.startswith("{") or head.startswith("```"):
+        return True
+    if '"caption"' in head or '"story"' in head:
+        return True
+    return False
+
+
+def _extract_json_fields_regex(raw: str) -> dict[str, str]:
+    """Best-effort field extract when full json.loads fails (truncated / bad escapes)."""
+    out: dict[str, str] = {}
+    text = raw or ""
+    for match in _JSON_FIELD_RE.finditer(text):
+        key = match.group(1)
+        out[key] = _unescape_json_string(match.group(2)).strip()
+
+    # Truncated story: "story": "....   (no closing quote)
+    if "story" not in out:
+        m = re.search(r'"story"\s*:\s*"(.*)\Z', text, re.DOTALL)
+        if m:
+            chunk = m.group(1)
+            # Drop trailing incomplete escape / JSON crumbs.
+            chunk = re.sub(r'\\$', "", chunk)
+            chunk = re.sub(r'"\s*,?\s*"?caption".*$', "", chunk, flags=re.I | re.DOTALL)
+            chunk = re.sub(r'"\s*\}\s*$', "", chunk)
+            recovered = _unescape_json_string(chunk).strip()
+            if recovered:
+                out["story"] = recovered
+
+    if "caption" not in out:
+        m = re.search(r'"caption"\s*:\s*"(.*?)(?:"\s*,|"\s*\}|\Z)', text, re.DOTALL)
+        if m:
+            recovered = _unescape_json_string(m.group(1)).strip()
+            # Reject if we clearly swallowed the story field.
+            if recovered and '"story"' not in recovered[:40]:
+                # Trim at story key if greedy
+                if '", "story"' in recovered or '","story"' in recovered:
+                    recovered = re.split(r'"\s*,\s*"story"', recovered, maxsplit=1)[0]
+                out["caption"] = recovered.strip().rstrip('"').strip()
+
+    return out
+
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
-    text = (raw or "").strip()
+    text = _strip_code_fences(raw or "")
     if not text:
         return None
     try:
@@ -23,13 +95,41 @@ def _extract_json_object(raw: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         pass
     match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        return None
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    fields = _extract_json_fields_regex(text)
+    return fields or None
+
+
+def _clean_caption(caption: str, story: str) -> str:
+    cap = (caption or "").strip()
+    if not cap or _looks_like_json_blob(cap):
+        prose = (story or "").strip()
+        if prose and not _looks_like_json_blob(prose):
+            first = prose.split("\n", 1)[0].strip()
+            return first[:180] if first else ""
+        return ""
+    return cap[:500]
+
+
+def _clean_story(story: str, raw: str) -> str:
+    text = (story or "").strip()
+    if text and not _looks_like_json_blob(text):
+        return text
+    fallback = _strip_code_fences(raw or "")
+    if fallback and not _looks_like_json_blob(fallback):
+        return fallback
+    # Last resort: regex story only (may be truncated but better than JSON leak).
+    fields = _extract_json_fields_regex(raw or "")
+    recovered = (fields.get("story") or "").strip()
+    if recovered and not _looks_like_json_blob(recovered):
+        return recovered
+    return ""
 
 
 def _target_chars(minutes: int) -> int:
@@ -60,8 +160,10 @@ async def generate_fairy_tale(
         "Отвечай ТОЛЬКО валидным JSON-объектом без markdown-ограждений: "
         '{"caption":"...","story":"..."}. '
         "caption — короткий анонс для поста в канал (2–5 предложений, можно с эмодзи). "
+        "В caption НЕ пиши призывы подписаться или поделиться — это добавит система. "
         "story — полный текст сказки для озвучки: чистая проза без markdown, "
         "без эмодзи, без заголовков # и без CTA/ссылок. "
+        "Внутри строк JSON экранируй кавычки как \\\" и переносы как \\n. "
         "Сюжет спокойный, тёплый, без страшилок, насилия и жести. "
         "Язык: русский."
     )
@@ -80,14 +182,10 @@ async def generate_fairy_tale(
         prompt=user_prompt, system_prompt=system_prompt
     )
     data = _extract_json_object(raw) or {}
-    caption = str(data.get("caption") or "").strip()
-    story = str(data.get("story") or "").strip()
-    if not story and raw.strip():
-        # Fallback: treat whole response as story, derive short caption.
-        story = raw.strip()
-        caption = caption or (story.split("\n", 1)[0][:180])
-    if not caption and story:
-        caption = story.split("\n", 1)[0][:180]
+    story = _clean_story(str(data.get("story") or ""), raw)
+    caption = _clean_caption(str(data.get("caption") or ""), story)
+    if not story:
+        logger.warning("generate_fairy_tale: failed to recover story from model output")
     return caption, story
 
 

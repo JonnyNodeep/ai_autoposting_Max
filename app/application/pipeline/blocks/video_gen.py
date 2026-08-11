@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +8,7 @@ import httpx
 from loguru import logger
 
 from app.application.pipeline.context import PipelineContext
+from app.infrastructure.services.openai_client import UPLOAD_DIR
 
 
 class VideoGenBlock:
@@ -72,35 +73,17 @@ class VideoGenBlock:
             if ctx.target == "user":
                 await ctx.notify("📥 Скачиваю видео и загружаю в MAX...")
 
-            tmp_path = None
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
-                    dl_response = await dl_client.get(video_url)
-                    dl_response.raise_for_status()
-                suffix = Path(video_url).suffix or ".mp4"
-                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                    f.write(dl_response.content)
-                    tmp_path = f.name
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
+                dl_response = await dl_client.get(video_url)
+                dl_response.raise_for_status()
+            suffix = Path(video_url).suffix or ".mp4"
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            local_path = UPLOAD_DIR / f"video_{uuid.uuid4().hex[:12]}{suffix}"
+            local_path.write_bytes(dl_response.content)
 
-                if ctx.channel_link:
-                    from app.infrastructure.services.openai_client import _apply_video_watermark
-
-                    slug = ctx.channel_link.rstrip("/").split("/")[-1]
-                    watermarked = str(Path(tmp_path).parent / f"wm_{Path(tmp_path).name}")
-                    _apply_video_watermark(tmp_path, watermarked, slug)
-                    Path(tmp_path).unlink()
-                    tmp_path = watermarked
-
-                ctx.video_token = await ctx.max_client.upload_file(tmp_path, "video")
-                # Keep file for optional Telegram mirror; post_gen cleans up.
-                ctx.video_local_path = tmp_path
-                tmp_path = None
-            finally:
-                if tmp_path:
-                    try:
-                        Path(tmp_path).unlink()
-                    except Exception:
-                        pass
+            ctx.video_token = await ctx.max_client.upload_file(str(local_path), "video")
+            # Keep file in uploads for later reuse (Pinterest, etc.).
+            ctx.video_local_path = str(local_path)
         except Exception as e:
             logger.exception(f"Pipeline video_gen failed run_id={ctx.run_id}: {e}")
             if ctx.target == "user" and ctx.target_user_id is not None:

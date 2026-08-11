@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Бета{% endblock %}
+{% block content %}
+<h2>Лимит беты и лист ожидания</h2>
+<div class="card">
+  <p>Активные пользователи (без админа): <strong>{{ used }}</strong>
+    {% if max_users %} / {{ max_users }}{% else %} (без лимита){% endif %}
+  </p>
+  <form method="post" action="/admin/beta/max-users" class="row">
+    <label>max_users (0 = без лимита)
+      <input type="number" name="max_users" min="0" value="{{ max_users }}" />
+    </label>
+    <button type="submit">Сохранить</button>
+  </form>
+</div>
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <h3>Лист ожидания ({{ waitlist|length }})</h3>
+    <form method="post" action="/admin/beta/admit-next">
+      <input type="hidden" name="n" value="5" />
+      <button type="submit">Впустить следующих 5</button>
+    </form>
+  </div>
+  <table>
+    <thead><tr><th>MAX id</th><th>Имя</th><th>С</th><th></th></tr></thead>
+    <tbody>
+      {% for w in waitlist %}
+      <tr>
+        <td>{{ w.max_user_id }}</td>
+        <td>{{ w.first_name }} {{ w.last_name or "" }} {% if w.username %}@{{ w.username }}{% endif %}</td>
+        <td>{{ w.created_at }}</td>
+        <td>
+          <form method="post" action="/admin/beta/admit/{{ w.id }}">
+            <button type="submit">Впустить</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">Пусто</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

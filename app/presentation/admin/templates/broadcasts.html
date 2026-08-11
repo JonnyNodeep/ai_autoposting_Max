@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Рассылки{% endblock %}
+{% block content %}
+<h2>Рассылки</h2>
+<div class="card">
+  <form method="post" action="/admin/broadcasts" class="stack">
+    <label>Сегмент
+      <select name="segment">
+        {% for s in segments %}
+        <option value="{{ s }}">{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Текст
+      <textarea name="text" rows="6" required></textarea>
+    </label>
+    <div class="row">
+      <button type="submit" name="action" value="create">Создать черновик</button>
+      <button type="submit" name="action" value="preview" class="secondary">Превью админу</button>
+    </div>
+  </form>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>ID</th><th>Сегмент</th><th>Статус</th><th>Прогресс</th><th>Создана</th><th></th></tr></thead>
+    <tbody>
+      {% for b in broadcasts %}
+      <tr>
+        <td>{{ b.id }}</td>
+        <td>{{ b.segment }}</td>
+        <td>{{ b.status }}</td>
+        <td>{{ b.sent }}/{{ b.total }} (ошибки {{ b.failed }})</td>
+        <td>{{ b.created_at }}</td>
+        <td>
+          <a href="/admin/broadcasts/{{ b.id }}">Открыть</a>
+          {% if b.status == "draft" %}
+          <form method="post" action="/admin/broadcasts/{{ b.id }}/send" style="display:inline">
+            <button type="submit">Отправить</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">Нет рассылок</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

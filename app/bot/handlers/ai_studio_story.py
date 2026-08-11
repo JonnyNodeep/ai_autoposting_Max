@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from app.application.auth.feature_access import audio_allowed, premium_invite_message
 from app.application.pipeline.blocks.story_gen import generate_fairy_tale
 from app.bot.ai_studio_text_input import claim_text_input
 from app.bot.keyboards.builder import InlineKeyboardBuilder
@@ -60,6 +61,14 @@ async def handle_story_callback(
     state = await fsm.get_state(max_user_id)
     if not state:
         await _session_expired(max_user_id, max_client)
+        return True
+
+    if not audio_allowed(max_user_id):
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=premium_invite_message("Аудио"),
+            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+        )
         return True
 
     if callback_data.startswith("ai:edit:story_gen"):
@@ -142,7 +151,7 @@ async def handle_story_callback(
         await fsm.set_block_data(
             max_user_id,
             "tts_gen",
-            {"model": "tts-1-hd", "response_format": "mp3"},
+            {"response_format": "mp3", "enabled": True},
         )
         await redis.delete(f"ai_story_gen_review:{max_user_id}")
         state = await fsm.get_state(max_user_id)

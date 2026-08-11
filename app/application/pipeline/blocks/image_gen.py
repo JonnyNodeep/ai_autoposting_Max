@@ -58,18 +58,10 @@ class ImageGenBlock:
             f"Pipeline image_gen: prompt_len={len(prompt)} "
             f"allow_text={allow_text} run_id={ctx.run_id}"
         )
-        add_watermark = bool(config.get("add_watermark", True))
-        channel_link = None
-        if add_watermark and not ctx.meta.get("skip_image_watermark"):
-            channel_link = ctx.channel_link or None
-        image_url = await ctx.openai_client.generate_image(
-            prompt=prompt,
-            channel_link=channel_link,
-        )
+        image_url = await ctx.openai_client.generate_image(prompt=prompt)
         ctx.image_url = image_url or ""
         logger.info(
-            f"Pipeline image_gen: url_preview={(ctx.image_url[:120] if ctx.image_url else 'empty')} "
-            f"watermark={'yes' if channel_link else 'no'}"
+            f"Pipeline image_gen: url_preview={(ctx.image_url[:120] if ctx.image_url else 'empty')}"
         )
         await self._maybe_preview(ctx, config, prompt=prompt)
 

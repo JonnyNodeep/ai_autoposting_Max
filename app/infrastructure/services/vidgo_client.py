@@ -12,25 +12,34 @@ from app.config import settings
 from app.infrastructure.services import vidgo_tasks
 
 DEFAULT_VIDEO_MODEL = "seedance-1.5-pro"
-FALLBACK_VIDEO_MODEL = "wan2.5-image-to-video"
-_GROK_LEGACY = "grok-imagine"
+FALLBACK_VIDEO_MODEL = "wan2.2-image-to-video-fast"
+GROK_VIDEO_MODEL = "grok-imagine"
+WAN22_FAST_MODEL = "wan2.2-image-to-video-fast"
+WAN25_I2V_MODEL = "wan2.5-image-to-video"
 
 _SEEDANCE_DEFAULTS: dict[str, Any] = {
     "duration": 4,
-    "resolution": "480p",
+    "resolution": "720p",
     "aspect_ratio": "9:16",
     "fixed_lens": False,
     "generate_audio": False,
+}
+_WAN22_FAST_DEFAULTS: dict[str, Any] = {
+    "resolution": "720p",
 }
 _WAN_I2V_DEFAULTS: dict[str, Any] = {
     "duration": 5,
     "resolution": "720p",
 }
+_GROK_DEFAULTS: dict[str, Any] = {
+    "duration": 6,
+    "mode": "normal",
+}
 
 
 def resolve_video_model(model: str | None) -> str:
-    """Map legacy grok config to Seedance; default to Seedance."""
-    if not model or model == _GROK_LEGACY:
+    """Normalize model id; empty → Seedance."""
+    if not model:
         return DEFAULT_VIDEO_MODEL
     return model
 
@@ -46,15 +55,19 @@ def video_submit_params(model: str, config: dict[str, Any] | None = None) -> dic
             "fixed_lens": bool(cfg.get("fixed_lens", _SEEDANCE_DEFAULTS["fixed_lens"])),
             "generate_audio": bool(cfg.get("generate_audio", _SEEDANCE_DEFAULTS["generate_audio"])),
         }
-    if model == "wan2.5-image-to-video":
+    if model == WAN22_FAST_MODEL:
+        return {
+            "resolution": str(cfg.get("resolution", _WAN22_FAST_DEFAULTS["resolution"])),
+        }
+    if model == WAN25_I2V_MODEL:
         return {
             "duration": int(cfg.get("duration", _WAN_I2V_DEFAULTS["duration"])),
             "resolution": str(cfg.get("resolution", _WAN_I2V_DEFAULTS["resolution"])),
         }
-    if model == _GROK_LEGACY:
+    if model == GROK_VIDEO_MODEL:
         return {
-            "duration": int(cfg.get("duration", 6)),
-            "mode": str(cfg.get("mode", "normal")),
+            "duration": int(cfg.get("duration", _GROK_DEFAULTS["duration"])),
+            "mode": str(cfg.get("mode", _GROK_DEFAULTS["mode"])),
         }
     return {
         "duration": int(cfg.get("duration", 6)),
@@ -63,25 +76,45 @@ def video_submit_params(model: str, config: dict[str, Any] | None = None) -> dic
     }
 
 
+def _primary_cfg_for_model(model: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    if model == "seedance-1.5-pro":
+        return {**_SEEDANCE_DEFAULTS, **{k: cfg[k] for k in _SEEDANCE_DEFAULTS if k in cfg}}
+    if model == WAN22_FAST_MODEL:
+        return {**_WAN22_FAST_DEFAULTS, **{k: cfg[k] for k in _WAN22_FAST_DEFAULTS if k in cfg}}
+    if model == WAN25_I2V_MODEL:
+        return {**_WAN_I2V_DEFAULTS, **{k: cfg[k] for k in _WAN_I2V_DEFAULTS if k in cfg}}
+    if model == GROK_VIDEO_MODEL:
+        return {**_GROK_DEFAULTS, **{k: cfg[k] for k in _GROK_DEFAULTS if k in cfg}}
+    return cfg
+
+
+def _fallback_cfg_for_model(model: str) -> dict[str, Any]:
+    if model == WAN22_FAST_MODEL:
+        return dict(_WAN22_FAST_DEFAULTS)
+    if model == WAN25_I2V_MODEL:
+        return dict(_WAN_I2V_DEFAULTS)
+    if model == "seedance-1.5-pro":
+        return dict(_SEEDANCE_DEFAULTS)
+    if model == GROK_VIDEO_MODEL:
+        return dict(_GROK_DEFAULTS)
+    return {"resolution": "720p"}
+
+
 def build_video_attempts(config: dict[str, Any] | None = None) -> list[tuple[str, dict[str, Any]]]:
-    """Primary model (+ Wan I2V fallback unless primary is already Wan)."""
+    """Primary model + fallback when different from primary."""
     cfg = dict(config or {})
     primary = resolve_video_model(cfg.get("model"))
-    # When remapping grok, force cheap Seedance params regardless of stale duration/mode.
-    if (config or {}).get("model") == _GROK_LEGACY:
-        primary_cfg = {**_SEEDANCE_DEFAULTS}
-    elif primary == "seedance-1.5-pro":
-        primary_cfg = {**_SEEDANCE_DEFAULTS, **{k: cfg[k] for k in _SEEDANCE_DEFAULTS if k in cfg}}
-    elif primary == "wan2.5-image-to-video":
-        primary_cfg = {**_WAN_I2V_DEFAULTS, **{k: cfg[k] for k in _WAN_I2V_DEFAULTS if k in cfg}}
-    else:
-        primary_cfg = cfg
+    primary_cfg = _primary_cfg_for_model(primary, cfg)
 
-    attempts: list[tuple[str, dict[str, Any]]] = [(primary, video_submit_params(primary, primary_cfg))]
+    attempts: list[tuple[str, dict[str, Any]]] = [
+        (primary, video_submit_params(primary, primary_cfg))
+    ]
 
-    fallback = cfg.get("fallback_model") or FALLBACK_VIDEO_MODEL
-    if primary != FALLBACK_VIDEO_MODEL and fallback == FALLBACK_VIDEO_MODEL:
-        attempts.append((FALLBACK_VIDEO_MODEL, video_submit_params(FALLBACK_VIDEO_MODEL, _WAN_I2V_DEFAULTS)))
+    fallback = str(cfg.get("fallback_model") or FALLBACK_VIDEO_MODEL)
+    if fallback and fallback != primary:
+        attempts.append(
+            (fallback, video_submit_params(fallback, _fallback_cfg_for_model(fallback)))
+        )
     return attempts
 
 
@@ -160,10 +193,12 @@ class VidGoClient:
             payload["input"]["duration"] = duration
             payload["input"]["fixed_lens"] = fixed_lens
             payload["input"]["generate_audio"] = generate_audio
-        elif model == "wan2.5-image-to-video":
+        elif model == WAN22_FAST_MODEL:
+            payload["input"]["resolution"] = resolution
+        elif model == WAN25_I2V_MODEL:
             payload["input"]["duration"] = duration
             payload["input"]["resolution"] = resolution
-        elif model == "grok-imagine":
+        elif model == GROK_VIDEO_MODEL:
             payload["input"]["duration"] = duration
             payload["input"]["mode"] = mode
 

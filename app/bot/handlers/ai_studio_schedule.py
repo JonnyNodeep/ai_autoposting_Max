@@ -8,8 +8,13 @@ from app.infrastructure.redis.client import get_redis
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 
-from app.bot.handlers.ai_studio_entry import REDIS_TTL, _session_expired, _show_blocks
+from app.bot.handlers.ai_studio_entry import (
+    SCHEDULE_SLOTS_TTL,
+    _session_expired,
+    _show_blocks,
+)
 from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
+from app.bot.texts.studio_hints import SCHEDULE_INTRO
 
 
 def _utc_to_msk_label(time_str: str) -> str:
@@ -17,6 +22,45 @@ def _utc_to_msk_label(time_str: str) -> str:
     h = (int(parts[0]) + 3) % 24
     m = parts[1] if len(parts) > 1 else "00"
     return f"{h:02d}:{m}"
+
+
+def _expected_slots(freq: str) -> int:
+    return {"2x_day": 2, "3x_day": 3}.get(freq, 1)
+
+
+def _schedule_time_prompt(*, slot: int = 1, total: int = 1) -> str:
+    """Compact header for time picker; keeps example style when multi-slot."""
+    if total > 1:
+        return f"⏱ *Слот {slot}/{total}* — выбери время"
+    return "⏱ *Расписание — выбери время*"
+
+
+def _schedule_custom_prompt(*, slot: int = 1, total: int = 1) -> str:
+    if total > 1:
+        return f"*Слот {slot}/{total}.* Напиши ЧЧ:ММ (МСК), напр. 14:30"
+    return "Напиши время в формате ЧЧ:ММ (по Москве).\nНапример: 14:30"
+
+
+async def _slots_expired(max_user_id: int, max_client) -> None:
+    builder = InlineKeyboardBuilder()
+    builder.row(("⏱ Расписание заново", "ai:edit:schedule"))
+    builder.row(("Назад к блокам", "ai:back_to_blocks"))
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=(
+            "Сессия слотов истекла (слишком долгий перерыв).\n"
+            "Открой «Расписание» и задай время заново."
+        ),
+        attachments=[builder.build()],
+    )
+
+
+async def _save_slots(redis, max_user_id: int, slot_state: dict) -> None:
+    await redis.setex(
+        f"ai_schedule_slots:{max_user_id}",
+        SCHEDULE_SLOTS_TTL,
+        json.dumps(slot_state),
+    )
 
 
 async def _save_schedule_and_show(
@@ -69,7 +113,7 @@ async def _ask_slot_prompt(
     total = len(times)
     time_utc = times[idx]
     msk = _utc_to_msk_label(time_utc)
-    await claim_text_input(redis, max_user_id, "schedule_slot_prompt", "1", REDIS_TTL)
+    await claim_text_input(redis, max_user_id, "schedule_slot_prompt", "1", SCHEDULE_SLOTS_TTL)
     await max_client.send_message_to_user(
         user_id=max_user_id,
         text=(
@@ -107,7 +151,7 @@ async def _finish_times_collected(
 
     slot_state["prompts"] = {}
     slot_state["prompt_idx"] = 0
-    await redis.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
+    await redis.setex(f"ai_schedule_slots:{max_user_id}", SCHEDULE_SLOTS_TTL, json.dumps(slot_state))
     await _ask_per_slot_toggle(max_user_id, max_client, times)
 
 
@@ -136,9 +180,10 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                f"⏱ *Расписание публикаций*\n\n"
-                f"Текущая: {freq_names.get(current_freq, current_freq)}\n\n"
-                f"_RSS-мониторинг отключён — работает только расписание._"
+                f"⏱ *Когда публиковать*\n\n"
+                f"{SCHEDULE_INTRO}\n\n"
+                f"Текущая частота: {freq_names.get(current_freq, current_freq)}\n\n"
+                f"_При включении расписания RSS-мониторинг отключается._"
             ),
             attachments=[InlineKeyboardBuilder.ai_schedule_freq_select()],
             fmt="markdown",
@@ -165,15 +210,15 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         )
         await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
 
-        slots_per_day = {"2x_day": 2, "3x_day": 3}.get(freq, 1)
+        slots_per_day = _expected_slots(freq)
         redis = await get_redis()
         slot_state = {"slot": 0, "total": slots_per_day, "times": [], "prompts": {}}
-        await redis.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
+        await _save_slots(redis, max_user_id, slot_state)
 
         slot_label = f"Время для слота 1 из {slots_per_day}" if slots_per_day > 1 else ""
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text=f"⏱ *Расписание — выбери время*",
+            text=_schedule_time_prompt(slot=1, total=slots_per_day),
             attachments=[InlineKeyboardBuilder.ai_schedule_time_picker(slot_label)],
             fmt="markdown",
         )
@@ -185,6 +230,9 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         times = []
         if raw:
             times = list(json.loads(raw).get("times") or [])
+        else:
+            await _slots_expired(max_user_id, max_client)
+            return True
         await redis.delete(f"ai_schedule_slots:{max_user_id}")
         await _save_schedule_and_show(
             max_user_id,
@@ -201,12 +249,12 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         redis = await get_redis()
         raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
         if not raw:
-            await _session_expired(max_user_id, max_client)
+            await _slots_expired(max_user_id, max_client)
             return True
         slot_state = json.loads(raw)
         slot_state["prompts"] = {}
         slot_state["prompt_idx"] = 0
-        await redis.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
+        await _save_slots(redis, max_user_id, slot_state)
         await _ask_slot_prompt(max_user_id, max_client, redis, slot_state)
         return True
 
@@ -214,7 +262,7 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         redis = await get_redis()
         raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
         if not raw:
-            await _session_expired(max_user_id, max_client)
+            await _slots_expired(max_user_id, max_client)
             return True
         slot_state = json.loads(raw)
         times = list(slot_state.get("times") or [])
@@ -232,21 +280,28 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
             )
             return True
         slot_state["prompt_idx"] = idx
-        await redis.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
+        await _save_slots(redis, max_user_id, slot_state)
         await _ask_slot_prompt(max_user_id, max_client, redis, slot_state)
         return True
 
     if callback_data.startswith("ai:block:schedule:time:custom"):
         redis = await get_redis()
-        await claim_text_input(redis, max_user_id, "schedule_custom", "1", REDIS_TTL)
+        await claim_text_input(redis, max_user_id, "schedule_custom", "1", SCHEDULE_SLOTS_TTL)
+        raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
+        slot_n, total = 1, 1
+        if raw:
+            st = json.loads(raw)
+            total = int(st.get("total") or 1)
+            slot_n = int(st.get("slot") or 0) + 1
 
         builder = InlineKeyboardBuilder()
         builder.row(("Назад к блокам", "ai:back_to_blocks"))
         builder.row(("На главную", "main_menu"))
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text="Напиши время в формате ЧЧ:ММ (по Москве).\nНапример: 14:30",
+            text=_schedule_custom_prompt(slot=slot_n, total=total),
             attachments=[builder.build()],
+            fmt="markdown",
         )
         return True
 
@@ -264,6 +319,10 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
         redis = await get_redis()
         raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
         if not raw:
+            freq = (state.get("blocks", {}).get("schedule") or {}).get("frequency", "daily")
+            if _expected_slots(freq) > 1:
+                await _slots_expired(max_user_id, max_client)
+                return True
             raw = json.dumps({"slot": 0, "total": 1, "times": [], "prompts": {}})
 
         slot_state = json.loads(raw)
@@ -276,11 +335,13 @@ async def handle_schedule_callback(callback_data: str, max_user_id: int, max_cli
             )
         else:
             slot_state["slot"] = slot_idx
-            await redis.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
-            slot_label = f"Время для слота {slot_idx + 1} из {slot_state['total']}"
+            await _save_slots(redis, max_user_id, slot_state)
+            next_slot = slot_idx + 1
+            total = int(slot_state["total"])
+            slot_label = f"Время для слота {next_slot} из {total}"
             await max_client.send_message_to_user(
                 user_id=max_user_id,
-                text=f"⏱ *Расписание — выбери время*",
+                text=_schedule_time_prompt(slot=next_slot, total=total),
                 attachments=[InlineKeyboardBuilder.ai_schedule_time_picker(slot_label)],
                 fmt="markdown",
             )
@@ -295,7 +356,7 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
         await redis.delete(f"ai_schedule_slot_prompt_wait:{max_user_id}")
         prompt_text = (message_text or "").strip()
         if len(prompt_text) < 3:
-            await claim_text_input(redis, max_user_id, "schedule_slot_prompt", "1", REDIS_TTL)
+            await claim_text_input(redis, max_user_id, "schedule_slot_prompt", "1", SCHEDULE_SLOTS_TTL)
             max_client = MaxAPIHTTPClient()
             await max_client.send_message_to_user(
                 user_id=max_user_id,
@@ -307,6 +368,9 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
 
         raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
         if not raw:
+            max_client = MaxAPIHTTPClient()
+            await _slots_expired(max_user_id, max_client)
+            await max_client.close()
             return True
         slot_state = json.loads(raw)
         times = list(slot_state.get("times") or [])
@@ -334,15 +398,24 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
                 )
             else:
                 slot_state["prompt_idx"] = next_idx
-                await redis.setex(
-                    f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state)
-                )
+                await _save_slots(redis, max_user_id, slot_state)
                 await _ask_slot_prompt(max_user_id, max_client, redis, slot_state)
             await max_client.close()
         return True
 
     schedule_custom = await redis.get(f"ai_schedule_custom_time:{max_user_id}")
     if not schedule_custom:
+        # User typed during slot picker without pressing «Своё время».
+        if await redis.get(f"ai_schedule_slots:{max_user_id}"):
+            from app.bot.ai_studio_text_input import SCHEDULE_CUSTOM_HINT
+
+            max_client = MaxAPIHTTPClient()
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=SCHEDULE_CUSTOM_HINT,
+            )
+            await max_client.close()
+            return True
         return False
 
     await redis.delete(f"ai_schedule_custom_time:{max_user_id}")
@@ -351,11 +424,18 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
 
     parsed = parse_time_hh_mm(message_text)
     if parsed is None:
-        await claim_text_input(redis, max_user_id, "schedule_custom", "1", REDIS_TTL)
+        await claim_text_input(redis, max_user_id, "schedule_custom", "1", SCHEDULE_SLOTS_TTL)
+        raw = await redis.get(f"ai_schedule_slots:{max_user_id}")
+        slot_n, total = 1, 1
+        if raw:
+            st = json.loads(raw)
+            total = int(st.get("total") or 1)
+            slot_n = int(st.get("slot") or 0) + 1
         max_client = MaxAPIHTTPClient()
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text="Не понял время. Напиши в формате ЧЧ:ММ, например 14:30.",
+            text=f"Не понял время. {_schedule_custom_prompt(slot=slot_n, total=total)}",
+            fmt="markdown",
         )
         await max_client.close()
         return True
@@ -387,24 +467,30 @@ async def handle_schedule_message(max_user_id: int, message_text: str, redis) ->
                 )
             else:
                 slot_state["slot"] = slot_idx
-                await redis2.setex(f"ai_schedule_slots:{max_user_id}", REDIS_TTL, json.dumps(slot_state))
-                slot_label = f"Время для слота {slot_idx + 1} из {slot_state['total']}"
+                await _save_slots(redis2, max_user_id, slot_state)
+                next_slot = slot_idx + 1
+                total = int(slot_state["total"])
+                slot_label = f"Время для слота {next_slot} из {total}"
                 await max_client.send_message_to_user(
                     user_id=max_user_id,
-                    text=f"⏱ *Расписание — выбери время*",
+                    text=_schedule_time_prompt(slot=next_slot, total=total),
                     attachments=[InlineKeyboardBuilder.ai_schedule_time_picker(slot_label)],
                     fmt="markdown",
                 )
         else:
-            await _save_schedule_and_show(
-                max_user_id,
-                max_client,
-                channel_repo,
-                session,
-                times=[time_str],
-                per_slot_prompts=False,
-                slot_prompts={},
-            )
+            freq = (state.get("blocks", {}).get("schedule") or {}).get("frequency", "daily")
+            if _expected_slots(freq) > 1:
+                await _slots_expired(max_user_id, max_client)
+            else:
+                await _save_schedule_and_show(
+                    max_user_id,
+                    max_client,
+                    channel_repo,
+                    session,
+                    times=[time_str],
+                    per_slot_prompts=False,
+                    slot_prompts={},
+                )
 
         await max_client.close()
         return True

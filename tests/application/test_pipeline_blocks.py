@@ -59,11 +59,11 @@ def test_ui_roundtrip_preserves_fields():
             "model": "seedance-1.5-pro",
             "duration": 4,
             "mode": "normal",
-            "resolution": "480p",
+            "resolution": "720p",
             "aspect_ratio": "9:16",
             "fixed_lens": False,
             "generate_audio": False,
-            "fallback_model": "wan2.5-image-to-video",
+            "fallback_model": "wan2.2-image-to-video-fast",
             "prompt_mode": "ai",
             "user_description": "",
             "generated_prompt": "",
@@ -103,7 +103,7 @@ def test_ui_roundtrip_preserves_fields():
     assert back["video_gen"]["model"] == "seedance-1.5-pro"
     assert back["video_gen"]["duration"] == 4
     assert back["video_gen"]["aspect_ratio"] == "9:16"
-    assert back["video_gen"]["fallback_model"] == "wan2.5-image-to-video"
+    assert back["video_gen"]["fallback_model"] == "wan2.2-image-to-video-fast"
     assert back["video_gen"]["generate_audio"] is False
 
 
@@ -216,7 +216,7 @@ async def test_post_gen_uses_slot_prompt_when_enabled():
 
 
 @pytest.mark.asyncio
-async def test_video_gen_calls_generate_with_fallback():
+async def test_video_gen_calls_generate_with_fallback(tmp_path):
     from unittest.mock import AsyncMock, patch
 
     from app.application.pipeline.blocks.video_gen import VideoGenBlock
@@ -276,6 +276,7 @@ async def test_video_gen_calls_generate_with_fallback():
             return_value=FakeVidGo(),
         ),
         patch("app.application.pipeline.blocks.video_gen.httpx.AsyncClient", FakeHttp),
+        patch("app.application.pipeline.blocks.video_gen.UPLOAD_DIR", tmp_path),
     ):
         await VideoGenBlock().execute(
             ctx,
@@ -283,7 +284,7 @@ async def test_video_gen_calls_generate_with_fallback():
                 "enabled": True,
                 "model": "seedance-1.5-pro",
                 "generated_prompt": "slow zoom",
-                "fallback_model": "wan2.5-image-to-video",
+                "fallback_model": "wan2.2-image-to-video-fast",
             },
         )
 
@@ -292,10 +293,19 @@ async def test_video_gen_calls_generate_with_fallback():
     assert captured["kwargs"]["config"]["model"] == "seedance-1.5-pro"
     assert ctx.video_token == "max-video-token"
     assert captured.get("closed") is True
+    assert Path(ctx.video_local_path).exists()
+    assert Path(ctx.video_local_path).parent == tmp_path
+    assert captured["upload"][1] == "video"
 
 
 @pytest.mark.asyncio
-async def test_runner_skips_unknown_and_runs_enabled_order():
+async def test_runner_skips_unknown_and_runs_enabled_order(monkeypatch):
+    from app.config import settings
+    from app.application.auth import feature_access as fa
+
+    monkeypatch.setattr(settings.features, "video_whitelist", "10")
+    fa._video_whitelist.cache_clear()
+
     calls: list[str] = []
 
     class _Block:
@@ -315,6 +325,7 @@ async def test_runner_skips_unknown_and_runs_enabled_order():
         run_id=1,
         max_client=None,
         openai_client=None,
+        meta={"owner_max_user_id": 10},
     )
     config = {
         "version": 2,
@@ -700,12 +711,12 @@ async def test_image_prompt_fixed_skips_visual_style_by_default():
 
 
 @pytest.mark.asyncio
-async def test_image_gen_passes_channel_link_for_watermark():
+async def test_image_gen_keeps_uploads_clean_without_channel_link_arg():
     calls: list[dict] = []
 
     class _OAI:
-        async def generate_image(self, prompt: str, channel_link: str | None = None):
-            calls.append({"prompt": prompt, "channel_link": channel_link})
+        async def generate_image(self, prompt: str):
+            calls.append({"prompt": prompt})
             return "/tmp/img.png"
 
     ctx = PipelineContext(
@@ -718,30 +729,30 @@ async def test_image_gen_passes_channel_link_for_watermark():
         image_prompt="food photo",
     )
     await ImageGenBlock().execute(ctx, {"add_watermark": True})
-    assert calls == [{"prompt": "food photo", "channel_link": "https://max.ru/pp_recipes"}]
+    assert calls == [{"prompt": "food photo"}]
     assert ctx.image_url == "/tmp/img.png"
 
 
 @pytest.mark.asyncio
-async def test_image_gen_skips_watermark_when_disabled():
+async def test_image_gen_defaults_generate_without_extra_args():
     calls: list[dict] = []
 
     class _OAI:
-        async def generate_image(self, prompt: str, channel_link: str | None = None):
-            calls.append({"prompt": prompt, "channel_link": channel_link})
+        async def generate_image(self, prompt: str):
+            calls.append({"prompt": prompt})
             return "/tmp/img.png"
 
     ctx = PipelineContext(
         channel=object(),  # type: ignore[arg-type]
         channel_link="https://max.ru/pp_recipes",
-        run_id=2,
+        run_id=4,
         max_client=None,
         openai_client=_OAI(),
         target="channel",
         image_prompt="food photo",
     )
-    await ImageGenBlock().execute(ctx, {"add_watermark": False})
-    assert calls == [{"prompt": "food photo", "channel_link": None}]
+    await ImageGenBlock().execute(ctx, {})
+    assert calls == [{"prompt": "food photo"}]
 
 
 @pytest.mark.asyncio
@@ -749,8 +760,8 @@ async def test_image_gen_appends_no_text_when_disallowed():
     calls: list[dict] = []
 
     class _OAI:
-        async def generate_image(self, prompt: str, channel_link: str | None = None):
-            calls.append({"prompt": prompt, "channel_link": channel_link})
+        async def generate_image(self, prompt: str):
+            calls.append({"prompt": prompt})
             return "/tmp/img.png"
 
     ctx = PipelineContext(
@@ -769,7 +780,6 @@ async def test_image_gen_appends_no_text_when_disallowed():
     assert len(calls) == 1
     assert "Букет пионов на столе" in calls[0]["prompt"]
     assert "Без текста" in calls[0]["prompt"]
-    assert calls[0]["channel_link"] == "https://max.ru/pp_recipes"
 
 
 @pytest.mark.asyncio
@@ -820,7 +830,7 @@ async def test_image_prompt_from_news_ai_fallback_without_image():
 @pytest.mark.asyncio
 async def test_image_gen_uses_news_url_without_openai():
     class _OAI:
-        async def generate_image(self, prompt: str, channel_link: str | None = None):
+        async def generate_image(self, prompt: str):
             raise AssertionError("should not generate")
 
     ctx = PipelineContext(
@@ -840,12 +850,12 @@ async def test_image_gen_uses_news_url_without_openai():
 
 
 @pytest.mark.asyncio
-async def test_image_gen_skips_watermark_when_video_follows():
+async def test_runner_sets_add_watermark_meta_and_keeps_image_clean():
     calls: list[dict] = []
 
     class _OAI:
-        async def generate_image(self, prompt: str, channel_link: str | None = None):
-            calls.append({"channel_link": channel_link})
+        async def generate_image(self, prompt: str):
+            calls.append({"prompt": prompt})
             return "/tmp/img.png"
 
     class _Max:
@@ -885,8 +895,9 @@ async def test_image_gen_skips_watermark_when_video_follows():
             "schedule": {"enabled": False, "frequency": "daily", "times": []},
         },
     )
-    assert ctx.meta.get("skip_image_watermark") is True
-    assert calls == [{"channel_link": None}]
+    assert ctx.meta.get("add_watermark") is True
+    assert "skip_image_watermark" not in ctx.meta
+    assert len(calls) == 1
     assert ctx.image_url == "/tmp/img.png"
 
 
@@ -962,7 +973,7 @@ async def test_post_gen_prefers_video_over_image():
 
 
 @pytest.mark.asyncio
-async def test_post_gen_deletes_local_image_after_upload(tmp_path):
+async def test_post_gen_keeps_local_image_after_upload(tmp_path):
     local = tmp_path / "logo_abc.png"
     local.write_bytes(b"fake-png")
     uploaded: list[tuple[str, str]] = []
@@ -997,8 +1008,8 @@ async def test_post_gen_deletes_local_image_after_upload(tmp_path):
         },
     )
     assert uploaded == [(str(local), "image")]
-    assert not local.exists()
-    assert ctx.image_url == ""
+    assert local.exists()
+    assert ctx.image_url == str(local)
 
 
 @pytest.mark.asyncio
@@ -1032,7 +1043,7 @@ async def test_post_gen_keeps_remote_image_url():
 
 
 @pytest.mark.asyncio
-async def test_post_gen_uploads_audio_and_deletes_local_file(tmp_path):
+async def test_post_gen_uploads_audio_and_keeps_local_file(tmp_path):
     local = tmp_path / "tts_story.mp3"
     local.write_bytes(b"fake-mp3")
     uploaded: list[tuple[str, str]] = []
@@ -1045,7 +1056,7 @@ async def test_post_gen_uploads_audio_and_deletes_local_file(tmp_path):
             return "audio-token"
 
         async def send_message(self, chat_id, text, attachments=None, fmt=None):
-            sent.append({"attachments": attachments})
+            sent.append({"text": text, "attachments": attachments})
 
     class _Channel:
         max_chat_id = 42
@@ -1058,6 +1069,7 @@ async def test_post_gen_uploads_audio_and_deletes_local_file(tmp_path):
         openai_client=None,
         target="channel",
         audio_local_path=str(local),
+        post_text="🎧 Аудиосказка",
     )
     await PostGenBlock().execute(
         ctx,
@@ -1071,8 +1083,9 @@ async def test_post_gen_uploads_audio_and_deletes_local_file(tmp_path):
     assert sent[0]["attachments"] == [
         {"type": "audio", "payload": {"token": "audio-token"}}
     ]
-    assert not local.exists()
-    assert ctx.audio_local_path == ""
+    assert "Поделитесь с друзьями — пусть и у них будет добрая сказка перед сном" in sent[0]["text"]
+    assert local.exists()
+    assert ctx.audio_local_path == str(local)
 
 
 @pytest.mark.asyncio
@@ -1118,8 +1131,8 @@ async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path):
     assert sent[1]["attachments"] == [
         {"type": "audio", "payload": {"token": "audio-token"}}
     ]
-    assert not local_audio.exists()
-    assert not local_image.exists()
+    assert local_audio.exists()
+    assert local_image.exists()
 
 
 @pytest.mark.asyncio
@@ -1131,6 +1144,9 @@ async def test_tts_gen_writes_audio_path():
             assert "сказка" in text
             assert kwargs["voice"] == "shimmer"
             assert kwargs["speed"] == 0.85
+            assert kwargs["model"] == "gpt-4o-mini-tts"
+            assert kwargs["instructions"]
+            assert "bedtime" in kwargs["instructions"].lower() or "softly" in kwargs["instructions"].lower()
             return "/tmp/out.mp3"
 
     ctx = PipelineContext(
@@ -1145,9 +1161,13 @@ async def test_tts_gen_writes_audio_path():
         ctx,
         {
             "enabled": True,
-            "model": "tts-1-hd",
+            "provider": "openai",
+            "model": "gpt-4o-mini-tts",
             "voice": "shimmer",
             "speed": 0.85,
+            "instructions": (
+                "Speak softly and calmly, like a bedtime storyteller for a young child."
+            ),
         },
     )
     assert ctx.audio_local_path == "/tmp/out.mp3"
@@ -1187,6 +1207,63 @@ async def test_story_gen_sets_caption_and_script():
     )
     assert ctx.post_text.startswith("🌙")
     assert "ёжик" in ctx.story_script
+
+
+@pytest.mark.asyncio
+async def test_story_gen_recovers_from_broken_json_without_leak():
+    from app.application.pipeline.blocks.story_gen import (
+        StoryGenBlock,
+        _clean_caption,
+        _clean_story,
+        _extract_json_object,
+    )
+
+    broken = (
+        '{"caption" : "🌙 Ёжик и луна", "story": "Жил-был маленький ёжик Тим. '
+        "Он шёл по тропинке и нашёл друга."
+        # missing closing quote/brace — simulates truncated model output
+    )
+    data = _extract_json_object(broken) or {}
+    story = _clean_story(str(data.get("story") or ""), broken)
+    caption = _clean_caption(str(data.get("caption") or ""), story)
+    assert not caption.startswith("{")
+    assert "caption" not in caption[:20]
+    assert "ёжик" in story.lower() or "Ёжик" in (caption + story)
+
+    class _OAI:
+        async def generate_text(self, prompt, system_prompt=None):
+            return broken
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=_OAI(),
+        target="user",
+        channel_title="Аудиосказки",
+    )
+    await StoryGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "ai",
+            "user_input": "добрые сказки",
+            "target_minutes": 5,
+        },
+    )
+    assert ctx.story_script
+    assert not (ctx.post_text or "").strip().startswith("{")
+    assert '{"caption"' not in (ctx.post_text or "")
+
+
+def test_build_share_cta_audio():
+    from app.application.pipeline.blocks.post_gen import build_share_cta_audio
+
+    text = build_share_cta_audio("🌙 Сказка про луну")
+    assert "Поделитесь с друзьями — пусть и у них будет добрая сказка перед сном" in text
+    # idempotent
+    assert build_share_cta_audio(text) == text
 
 
 def test_migrate_story_topic_queue_into_post_gen():
@@ -1254,18 +1331,27 @@ async def test_story_gen_pops_shared_post_topic_queue():
     assert ctx.meta["topic_queue_remaining"] == ["Ещё"]
     assert ctx.meta["shared_topic_queue"] == ["Ещё"]
     assert ctx.post_text == "Анонс"
-    from app.application.pipeline.tts_chunking import chunk_tts_text
+    from app.application.pipeline.tts_chunking import chunk_tts_text, max_chars_for_model
 
-    part = "А" * 2000
+    assert max_chars_for_model("gpt-4o-mini-tts") == 1600
+    assert max_chars_for_model("tts-1-hd") == 4096
+
+    part = "А" * 900
     text = f"{part}.\n\n{part}.\n\n{part}."
-    chunks = chunk_tts_text(text, max_chars=4096)
+    chunks = chunk_tts_text(text, max_chars=1600)
     assert len(chunks) >= 2
-    assert all(len(c) <= 4096 for c in chunks)
+    assert all(len(c) <= 1600 for c in chunks)
 
 
 @pytest.mark.asyncio
-async def test_runner_skips_post_preseed_when_story_gen_enabled():
+async def test_runner_skips_post_preseed_when_story_gen_enabled(monkeypatch):
     from unittest.mock import AsyncMock
+
+    from app.application.auth import feature_access as fa
+    from app.config import settings
+
+    monkeypatch.setattr(settings.features, "audio_whitelist", "10")
+    fa._audio_whitelist.cache_clear()
 
     class _Story:
         type_id = "story_gen"
@@ -1294,6 +1380,7 @@ async def test_runner_skips_post_preseed_when_story_gen_enabled():
         max_client=None,
         openai_client=oai,
         target="user",
+        meta={"owner_max_user_id": 10},
     )
     config = {
         "version": 2,
@@ -1308,3 +1395,86 @@ async def test_runner_skips_post_preseed_when_story_gen_enabled():
     assert ctx.post_text == "caption"
     oai.generate_text.assert_not_called()
 
+
+
+@pytest.mark.asyncio
+async def test_post_gen_applies_logo_watermark_on_local_image(tmp_path):
+    from PIL import Image
+
+    src = tmp_path / "clean.png"
+    logo = tmp_path / "logo.png"
+    Image.new("RGB", (200, 200), color=(10, 20, 30)).save(src)
+    Image.new("RGBA", (40, 40), color=(255, 0, 0, 255)).save(logo)
+
+    uploaded: list[str] = []
+    sent: list[dict] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            uploaded.append(path)
+            assert Path(path).exists()
+            # Source in uploads/tmp must stay clean — dest is a temp wm file.
+            assert Path(path).resolve() != src.resolve()
+            return "wm-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"attachments": attachments})
+
+    class _Channel:
+        max_chat_id = 7
+        logo_path = str(logo)
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        image_url=str(src),
+        meta={"add_watermark": True},
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {"enabled": True, "generated_post": "Пост", "add_channel_link": False},
+    )
+    assert Path(src).read_bytes()  # still exists
+    assert uploaded
+    assert sent[0]["attachments"] == [
+        {"type": "image", "payload": {"token": "wm-token"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_gen_skips_watermark_without_logo(tmp_path):
+    src = tmp_path / "clean.png"
+    src.write_bytes(b"png")
+    uploaded: list[str] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            uploaded.append(path)
+            return "clean-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            return None
+
+    class _Channel:
+        max_chat_id = 7
+        logo_path = None
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        image_url=str(src),
+        meta={"add_watermark": True},
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {"enabled": True, "generated_post": "Пост", "add_channel_link": False},
+    )
+    assert uploaded == [str(src)]

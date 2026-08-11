@@ -1,6 +1,7 @@
 import json
 from urllib.parse import urlparse
 
+from app.application.auth.feature_access import premium_invite_message, rss_allowed
 from app.application.pipeline.rss_monitor import (
     NICHE_LABELS,
     format_keywords_review,
@@ -123,6 +124,20 @@ async def _run_keyword_generation(
 
 
 async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, channel_repo, session) -> bool:
+    is_rss_cb = (
+        callback_data == "ai:edit:news_rss"
+        or callback_data.startswith("ai:block:news_rss:")
+    )
+    if not is_rss_cb:
+        return False
+    if not rss_allowed(max_user_id):
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=premium_invite_message("RSS и новости"),
+            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+        )
+        return True
+
     if callback_data == "ai:edit:news_rss":
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -234,6 +249,47 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
         await _show_rss_menu(max_user_id, max_client, state)
         return True
 
+    if callback_data == "ai:block:news_rss:rate":
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+        block = normalize_news_rss((state.get("blocks") or {}).get("news_rss"))
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "⏱ *Лимит публикаций*\n\n"
+                "Сколько новостей максимум за час.\n"
+                "«Без лимита» — публиковать сразу все найденные "
+                "(до 10 за один опрос)."
+            ),
+            attachments=[InlineKeyboardBuilder.ai_news_rss_rate_select(block)],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:news_rss:rate_set:"):
+        raw = callback_data.split(":")[4]
+        try:
+            limit = int(raw)
+        except ValueError:
+            limit = 3
+        if limit not in (0, 3, 10):
+            limit = 3
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+        await fsm.set_block_data(
+            max_user_id, "news_rss", {"max_posts_per_hour": limit}
+        )
+        state = await fsm.get_state(max_user_id)
+        await sync_active_pipeline(session, state)
+        await _show_rss_menu(max_user_id, max_client, state)
+        return True
+
     if callback_data == "ai:block:news_rss:window":
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
@@ -245,8 +301,10 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
             user_id=max_user_id,
             text=(
                 "🕐 *Окно публикаций (МСК)*\n\n"
-                "Ночью бот не публикует. Новости ждут утра "
-                "(срок свежести — до 24 часов)."
+                "Новости публикуются только в выбранном интервале.\n"
+                "«Без окна (круглосуточно)» — в любое время суток.\n"
+                "Одинаковые края своего диапазона (например `00:00-00:00`) "
+                "тоже отключают окно."
             ),
             attachments=[InlineKeyboardBuilder.ai_news_rss_window_select(block)],
             fmt="markdown",
@@ -287,7 +345,8 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
             text=(
                 "✏️ *Своё окно (МСК)*\n\n"
                 "Пришли диапазон в формате `09:00-22:00`.\n"
-                "Одинаковые время = круглосуточно, например `00:00-00:00`."
+                "Одинаковые время = без окна (круглосуточно), "
+                "например `00:00-00:00`."
             ),
             attachments=[builder.build()],
             fmt="markdown",
@@ -432,6 +491,9 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
 
 
 async def handle_rss_message(max_user_id: int, message_text: str, redis) -> bool:
+    if not rss_allowed(max_user_id):
+        return False
+
     window_wait = await redis.get(f"ai_rss_window_wait:{max_user_id}")
     if window_wait:
         await redis.delete(f"ai_rss_window_wait:{max_user_id}")

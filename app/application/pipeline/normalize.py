@@ -43,10 +43,14 @@ _CONFIG_KEYS = {
         "generated_caption",
     ),
     "tts_gen": (
+        "provider",
         "model",
         "voice",
         "speed",
+        "role",
         "response_format",
+        "instructions",
+        "instructions_preset",
     ),
     "post_gen": (
         "mode",
@@ -105,14 +109,79 @@ def _normalize_story_gen_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
+    from app.application.pipeline.tts_instructions import (
+        DEFAULT_TTS_INSTRUCTIONS,
+        DEFAULT_TTS_INSTRUCTIONS_PRESET,
+        TTS_INSTRUCTION_PRESETS,
+    )
+    from app.application.pipeline.tts_voices import (
+        DEFAULT_OPENAI_SPEED,
+        DEFAULT_OPENAI_VOICE,
+        DEFAULT_SPEECHKIT_ROLE,
+        DEFAULT_SPEECHKIT_SPEED,
+        DEFAULT_SPEECHKIT_VOICE,
+        TTS_PROVIDER_OPENAI,
+        TTS_PROVIDER_SPEECHKIT,
+        TTS_PROVIDERS,
+        openai_voice_ids,
+        resolve_role,
+        speechkit_voice_ids,
+    )
+
     cfg = dict(config or {})
-    cfg["model"] = str(cfg.get("model") or "tts-1-hd").strip() or "tts-1-hd"
-    cfg["voice"] = str(cfg.get("voice") or "shimmer").strip() or "shimmer"
+    if "provider" in cfg and str(cfg.get("provider") or "").strip():
+        provider = str(cfg.get("provider")).strip().lower()
+    else:
+        # Legacy pipelines had no provider field → OpenAI.
+        provider = TTS_PROVIDER_OPENAI
+    if provider not in TTS_PROVIDERS:
+        provider = TTS_PROVIDER_OPENAI
+    cfg["provider"] = provider
+
+    model = str(cfg.get("model") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    if model in ("tts-1", "tts-1-hd"):
+        model = "gpt-4o-mini-tts"
+    cfg["model"] = model
     cfg["response_format"] = str(cfg.get("response_format") or "mp3").strip() or "mp3"
-    try:
-        cfg["speed"] = max(0.25, min(float(cfg.get("speed", 0.85)), 4.0))
-    except (TypeError, ValueError):
-        cfg["speed"] = 0.85
+
+    if provider == TTS_PROVIDER_SPEECHKIT:
+        voice = str(cfg.get("voice") or DEFAULT_SPEECHKIT_VOICE).strip() or DEFAULT_SPEECHKIT_VOICE
+        if voice not in speechkit_voice_ids():
+            voice = DEFAULT_SPEECHKIT_VOICE
+        cfg["voice"] = voice
+        try:
+            cfg["speed"] = max(0.1, min(float(cfg.get("speed", DEFAULT_SPEECHKIT_SPEED)), 3.0))
+        except (TypeError, ValueError):
+            cfg["speed"] = DEFAULT_SPEECHKIT_SPEED
+        role = resolve_role(voice, str(cfg.get("role") or DEFAULT_SPEECHKIT_ROLE))
+        cfg["role"] = role or DEFAULT_SPEECHKIT_ROLE
+    else:
+        voice = str(cfg.get("voice") or DEFAULT_OPENAI_VOICE).strip() or DEFAULT_OPENAI_VOICE
+        if voice not in openai_voice_ids():
+            # Migrating from SpeechKit voice while on openai
+            if voice in speechkit_voice_ids():
+                voice = DEFAULT_OPENAI_VOICE
+            else:
+                voice = DEFAULT_OPENAI_VOICE
+        cfg["voice"] = voice
+        try:
+            cfg["speed"] = max(0.25, min(float(cfg.get("speed", DEFAULT_OPENAI_SPEED)), 4.0))
+        except (TypeError, ValueError):
+            cfg["speed"] = DEFAULT_OPENAI_SPEED
+        cfg["role"] = str(cfg.get("role") or "").strip()
+
+    preset = str(cfg.get("instructions_preset") or "").strip() or DEFAULT_TTS_INSTRUCTIONS_PRESET
+    if preset not in TTS_INSTRUCTION_PRESETS and preset != "custom":
+        preset = DEFAULT_TTS_INSTRUCTIONS_PRESET
+    cfg["instructions_preset"] = preset
+
+    instructions = str(cfg.get("instructions") or "").strip()
+    if not instructions:
+        if preset in TTS_INSTRUCTION_PRESETS:
+            instructions = TTS_INSTRUCTION_PRESETS[preset]
+        else:
+            instructions = DEFAULT_TTS_INSTRUCTIONS
+    cfg["instructions"] = instructions[:800]
     return cfg
 
 

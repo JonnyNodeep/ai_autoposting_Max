@@ -1,7 +1,6 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
-from app.infrastructure.services.openai_client import OpenAIService
 from app.application.content.prompts import ContentPrompts
 from app.application.content.content_generation import (
     AnalyzeStyleUseCase,
@@ -10,7 +9,6 @@ from app.application.content.content_generation import (
 )
 from app.domain.entities.channel import Channel
 from app.domain.value_objects.style_profile import StyleProfile
-from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
 
 
 class MockChannelRepo:
@@ -85,24 +83,60 @@ async def test_generate_description(sample_channel):
 
 
 @pytest.mark.asyncio
-async def test_generate_logo(sample_channel):
-    repo = MockChannelRepo(sample_channel)
+async def test_generate_logo(sample_channel, tmp_path, monkeypatch):
+    from pathlib import Path
 
+    import app.application.channels.watermark_logo as wm
+    from io import BytesIO
+    from PIL import Image
+
+    monkeypatch.setattr(wm, "UPLOAD_DIR", tmp_path)
+
+    buf = BytesIO()
+    Image.new("RGB", (16, 16), color=(1, 2, 3)).save(buf, "PNG")
+    payload = buf.getvalue()
+
+    repo = MockChannelRepo(sample_channel)
     mock_openai = AsyncMock()
     mock_openai.generate_image.return_value = "https://example.com/logo.png"
 
+    class _Resp:
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url):
+            assert url == "https://example.com/logo.png"
+            return _Resp()
+
+    monkeypatch.setattr(wm.httpx, "AsyncClient", lambda **kw: _Client())
     uc = GenerateLogoUseCase(repo, mock_openai)
     url = await uc.execute(1)
 
-    assert url == "https://example.com/logo.png"
+    assert url == str(tmp_path / "logos" / "1.png")
+    assert repo._channel.logo_path == str(tmp_path / "logos" / "1.png")
+    assert Path(repo._channel.logo_path).exists()
 
 
 @pytest.mark.asyncio
-async def test_generate_logo_deletes_local_file_after_upload(sample_channel, tmp_path):
+async def test_generate_logo_keeps_local_file_after_upload(sample_channel, tmp_path, monkeypatch):
     from pathlib import Path
 
+    import app.application.channels.watermark_logo as wm
+    from PIL import Image
+
+    monkeypatch.setattr(wm, "UPLOAD_DIR", tmp_path)
+
     local = tmp_path / "logo_xyz.png"
-    local.write_bytes(b"png")
+    Image.new("RGB", (8, 8), color=(9, 9, 9)).save(local)
 
     repo = MockChannelRepo(sample_channel)
     mock_openai = AsyncMock()
@@ -114,9 +148,12 @@ async def test_generate_logo_deletes_local_file_after_upload(sample_channel, tmp
     uc = GenerateLogoUseCase(repo, mock_openai, mock_max)
     token = await uc.execute(1)
 
+    dest = tmp_path / "logos" / "1.png"
     assert token == "max-logo-token"
-    mock_max.upload_file.assert_awaited_once_with(str(local), "image")
-    assert not Path(local).exists()
+    mock_max.upload_file.assert_awaited_once_with(str(dest), "image")
+    assert Path(local).exists()
+    assert dest.exists()
+    assert repo._channel.logo_path == str(dest)
 
 
 def test_style_prompt():

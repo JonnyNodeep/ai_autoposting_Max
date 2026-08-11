@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
-from uuid import uuid4
 
 
 @dataclass(kw_only=True)
@@ -10,6 +9,9 @@ class User:
     username: str | None = None
     first_name: str
     last_name: str | None = None
+    discount_percent: int = 0
+    referral_code: str | None = None
+    referred_by_user_id: int | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     is_active: bool = True
 

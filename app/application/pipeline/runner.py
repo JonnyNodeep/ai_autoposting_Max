@@ -4,6 +4,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.application.auth.feature_access import audio_allowed, video_allowed
 from app.application.pipeline.blocks.registry import BlockRegistry, default_registry
 from app.application.pipeline.context import PipelineContext
 from app.application.pipeline.generate_post import TopicDedupExhausted, generate_post_text
@@ -49,11 +50,13 @@ class PipelineRunner:
     async def run(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
         v2 = normalize_blocks_config(blocks_config)
 
-        # If video follows, watermark only the video — avoid double slug on cards.
-        video_enabled = any(
-            s.get("type") == "video_gen" and s.get("enabled") for s in v2["steps"]
-        )
-        ctx.meta["skip_image_watermark"] = bool(video_enabled)
+        # Publish-time logo watermark flag lives on image_gen config.
+        add_watermark = False
+        for step in v2["steps"]:
+            if step.get("type") == "image_gen":
+                add_watermark = bool((step.get("config") or {}).get("add_watermark", False))
+                break
+        ctx.meta["add_watermark"] = add_watermark
 
         story_enabled = any(
             s.get("type") == "story_gen" and s.get("enabled") for s in v2["steps"]
@@ -83,8 +86,23 @@ class PipelineRunner:
                 await self._alert_topic_dedup(ctx, e)
                 return ctx
 
+        owner_id = _owner_max_user_id(ctx)
+
         for step in v2["steps"]:
             block_type = step["type"]
+            if block_type == "video_gen" and not video_allowed(owner_id):
+                logger.debug(
+                    f"Skipping video_gen — not whitelisted owner={owner_id} "
+                    f"run_id={ctx.run_id}"
+                )
+                continue
+            if block_type in ("tts_gen", "story_gen") and not audio_allowed(owner_id):
+                logger.debug(
+                    f"Skipping {block_type} — not whitelisted owner={owner_id} "
+                    f"run_id={ctx.run_id}"
+                )
+                continue
+
             block = self._registry.get(block_type)
             if block is None:
                 logger.warning(f"Unknown pipeline block type={block_type}, skipping")

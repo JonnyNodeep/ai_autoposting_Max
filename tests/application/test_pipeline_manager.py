@@ -191,7 +191,13 @@ async def test_update_active_config_noop_without_active_run():
 
 
 @pytest.mark.asyncio
-async def test_start_rss_mode_uses_interval_job():
+async def test_start_rss_mode_uses_interval_job(monkeypatch):
+    from app.config import settings
+    from app.application.auth import feature_access as fa
+
+    monkeypatch.setattr(settings.features, "rss_whitelist", "10")
+    fa._rss_whitelist.cache_clear()
+
     repo = AsyncMock()
     repo.stop_all_active_by_channel = AsyncMock(return_value=[])
     created = PipelineRun(

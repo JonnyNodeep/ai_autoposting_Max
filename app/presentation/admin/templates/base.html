@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}Админка{% endblock %} · AI Content Studio</title>
+  <link rel="stylesheet" href="/admin/static/admin.css" />
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+{% if request.url.path != '/admin/login' %}
+<div class="layout">
+  <aside class="sidebar">
+    <h1>AI Studio Admin</h1>
+    <nav>
+      <a href="/admin/" class="{% if request.url.path == '/admin/' %}active{% endif %}">Дашборд</a>
+      <a href="/admin/users" class="{% if '/admin/users' in request.url.path %}active{% endif %}">Пользователи</a>
+      <a href="/admin/beta" class="{% if request.url.path == '/admin/beta' %}active{% endif %}">Бета / лист ожидания</a>
+      <a href="/admin/payments" class="{% if request.url.path == '/admin/payments' %}active{% endif %}">Платежи</a>
+      <a href="/admin/broadcasts" class="{% if '/admin/broadcasts' in request.url.path %}active{% endif %}">Рассылки</a>
+      <a href="/admin/settings" class="{% if request.url.path == '/admin/settings' %}active{% endif %}">Настройки</a>
+      <a href="/admin/logout">Выйти</a>
+    </nav>
+  </aside>
+  <main class="main">
+    {% if flash %}
+      <div class="flash {{ flash.kind }}">{{ flash.message }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+{% else %}
+  {% block login %}{% endblock %}
+{% endif %}
+</body>
+</html>

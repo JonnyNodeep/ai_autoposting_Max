@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from app.application.auth.feature_access import audio_allowed, premium_invite_message
 from app.application.pipeline.topic_queue import (
     TOPIC_QUEUE_MAX_ITEMS,
     generate_topics_for_brief,
@@ -188,6 +189,14 @@ async def handle_topic_queue_callback(
     state = await fsm.get_state(max_user_id)
     if not state:
         await _session_expired(max_user_id, max_client)
+        return True
+
+    if block == "story_gen" and not audio_allowed(max_user_id):
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=premium_invite_message("Очередь тем для аудио"),
+            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+        )
         return True
 
     if callback_data == "ai:edit:story_topics":

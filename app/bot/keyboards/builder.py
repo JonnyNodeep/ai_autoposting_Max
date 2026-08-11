@@ -1,6 +1,11 @@
 from typing import Any
 
 from app.config import settings
+from app.application.auth.feature_access import (
+    audio_allowed,
+    rss_allowed,
+    video_allowed,
+)
 
 
 class InlineKeyboardBuilder:
@@ -49,11 +54,29 @@ class InlineKeyboardBuilder:
             .row((channels_label, "channels:list"), ("💳 Подписка", "subscription:status"))
             .row(("➕ Добавить канал", "channels:add"))
             .row(("🤖 AI Content Studio", "ai_studio"))
-            .row(("Помощь", "help"), ("Настройки", "settings"))
+            .row(("❓ Помощь", "help"))
         )
         if max_user_id and max_user_id == settings.admin.max_user_id:
             result.row(("🛠 Админ", "admin:menu"))
         return result.build()
+
+    @classmethod
+    def help_menu(cls, max_user_id: int | None = None) -> dict[str, Any]:
+        builder = cls()
+        builder.row(("🚀 Как начать", "help:faq:start"))
+        builder.row(("📋 Посты и подписка", "help:faq:subscribe_cta"))
+        builder.row(("⏱ Расписание", "help:faq:schedule"))
+        builder.row(("🧪 Тест и запуск", "help:faq:test"))
+        builder.row(("🖼 Картинки", "help:faq:images"))
+        if rss_allowed(max_user_id):
+            builder.row(("📰 RSS и новости", "help:faq:rss"))
+        if video_allowed(max_user_id) or audio_allowed(max_user_id):
+            builder.row(("🎬 Видео и аудио", "help:faq:video_audio"))
+        builder.row(("📎 Telegram", "help:faq:telegram"))
+        builder.row(("💳 Подписка", "help:faq:subscription"))
+        builder.row(("⏳ Сессия истекла", "help:faq:session"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
 
     @classmethod
     def topic_presets(cls) -> dict[str, Any]:
@@ -145,7 +168,19 @@ class InlineKeyboardBuilder:
             cls()
             .row(("Настроить", f"setup:start:{channel_id}"))
             .row(("👁️ Визуальный стиль", f"setup:visual:analyze:{channel_id}"))
+            .row(("🖼 Логотип watermark", f"channels:wm_logo:{channel_id}"))
             .row(("Удалить", f"channels:delete:{channel_id}"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def watermark_logo_menu(cls, channel_id: int) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("Взять из иконки канала", f"channels:wm_logo:sync:{channel_id}"))
+            .row(("Загрузить свой файл", f"channels:wm_logo:upload:{channel_id}"))
+            .row(("К каналу", f"channels:select:{channel_id}"))
             .row(("На главную", "main_menu"))
             .build()
         )
@@ -161,6 +196,7 @@ class InlineKeyboardBuilder:
             builder
             .row(("Настроить", f"setup:start:{channel_id}"))
             .row(("👁️ Визуальный стиль", f"setup:visual:analyze:{channel_id}"))
+            .row(("🖼 Логотип watermark", f"channels:wm_logo:{channel_id}"))
             .row(("Удалить", f"channels:delete:{channel_id}"))
             .row(("К списку каналов", "channels:list"))
             .row(("На главную", "main_menu"))
@@ -202,13 +238,18 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
-    def ai_studio_blocks(cls, blocks: dict, pipeline_active: bool = False) -> dict[str, Any]:
+    def ai_studio_blocks(
+        cls,
+        blocks: dict,
+        pipeline_active: bool = False,
+        max_user_id: int | None = None,
+    ) -> dict[str, Any]:
         builder = cls()
 
         sched_enabled = blocks.get("schedule", {}).get("enabled", False)
         sched_freq = blocks.get("schedule", {}).get("frequency", "daily")
         sched_times = blocks.get("schedule", {}).get("times", [])
-        sched_label = "⏱ Расписание публикаций"
+        sched_label = "⏱ Когда публиковать"
         freq_names = {"daily": "1 раз в день", "2x_day": "2 раза в день", "3x_day": "3 раза в день",
                        "2x_week": "2 раза в неделю", "weekly": "1 раз в неделю"}
         if sched_enabled:
@@ -225,33 +266,32 @@ class InlineKeyboardBuilder:
                 sched_label += " + промпты по слотам"
         else:
             sched_label += " (выкл)"
-        builder.row((sched_label, "ai:edit:schedule"))
 
         rss = blocks.get("news_rss") or {}
         rss_enabled = bool(rss.get("enabled", False))
         rss_feeds = list(rss.get("feeds") or [])
         rss_sites = list(rss.get("sites") or [])
-        rss_label = "📰 RSS / сайты"
-        if rss_enabled:
-            interval = rss.get("poll_interval_minutes", 5)
-            niche = rss.get("niche") or ""
-            from app.application.pipeline.rss_monitor import NICHE_LABELS
-            niche_part = f" / {NICHE_LABELS.get(niche, niche)}" if niche else ""
-            parts = [f"{len(rss_feeds)} лент"]
-            if rss_sites:
-                parts.append(f"{len(rss_sites)} сайт.")
-            rss_label += f" — {', '.join(parts)} / {interval} мин{niche_part}"
-        else:
-            rss_label += " (выкл)"
-        builder.row((rss_label, "ai:edit:news_rss"))
+        if rss_allowed(max_user_id):
+            rss_label = "📰 RSS / сайты"
+            if rss_enabled:
+                interval = rss.get("poll_interval_minutes", 5)
+                niche = rss.get("niche") or ""
+                from app.application.pipeline.rss_monitor import NICHE_LABELS
+                niche_part = f" / {NICHE_LABELS.get(niche, niche)}" if niche else ""
+                parts = [f"{len(rss_feeds)} лент"]
+                if rss_sites:
+                    parts.append(f"{len(rss_sites)} сайт.")
+                rss_label += f" — {', '.join(parts)} / {interval} мин{niche_part}"
+            else:
+                rss_label += " (выкл)"
+            builder.row((rss_label, "ai:edit:news_rss"))
 
         image_enabled = blocks.get("image_gen", {}).get("enabled", False)
-        image_model = blocks.get("image_gen", {}).get("model", "")
-        image_label = "🖼 Генерация изображений"
+        image_label = "🖼 Картинки к посту"
         if image_enabled:
-            wm = "да" if blocks.get("image_gen", {}).get("add_watermark", True) else "нет"
-            txt = "да" if blocks.get("image_gen", {}).get("allow_text", True) else "нет"
-            image_label += f" — {image_model} · wm:{wm} · текст:{txt}"
+            wm = "логотип" if blocks.get("image_gen", {}).get("add_watermark", False) else "без wm"
+            txt = "текст" if blocks.get("image_gen", {}).get("allow_text", True) else "без текста"
+            image_label += f" — вкл · {wm} · {txt}"
         else:
             image_label += " (выкл)"
         builder.row((image_label, "ai:edit:image_gen"))
@@ -259,7 +299,7 @@ class InlineKeyboardBuilder:
         prompt_enabled = blocks.get("image_prompt", {}).get("enabled", False)
         prompt_preview = blocks.get("image_prompt", {}).get("generated_prompt", "")
         prompt_mode = blocks.get("image_prompt", {}).get("mode", "ai")
-        prompt_label = "📝 Промпт для изображений"
+        prompt_label = "📝 Промпт для картинки"
         if prompt_enabled:
             if prompt_mode == "from_topic":
                 prompt_label += " — по теме поста"
@@ -276,39 +316,62 @@ class InlineKeyboardBuilder:
             prompt_label += " (выкл)"
         builder.row((prompt_label, "ai:edit:image_prompt"))
 
-        video_enabled = blocks.get("video_gen", {}).get("enabled", False)
-        video_model = blocks.get("video_gen", {}).get("model", "")
-        video_label = "🎬 Генерация видео"
-        if video_enabled:
-            video_label += f" — {video_model}"
-        else:
-            video_label += " (выкл)"
-        builder.row((video_label, "ai:edit:video_gen"))
+        if video_allowed(max_user_id):
+            video_enabled = blocks.get("video_gen", {}).get("enabled", False)
+            video_label = "🎬 Видео"
+            if video_enabled:
+                video_label += " — вкл"
+            else:
+                video_label += " (выкл)"
+            builder.row((video_label, "ai:edit:video_gen"))
 
         story = blocks.get("story_gen") or {}
         tts = blocks.get("tts_gen") or {}
         audio_on = bool(story.get("enabled") and tts.get("enabled"))
-        audio_label = "🎙 Аудио"
-        if audio_on:
-            mins = story.get("target_minutes", 5)
-            voice = tts.get("voice") or "shimmer"
-            fmt = story.get("format") or "fairy_tale"
-            kind = "сказка" if fmt in ("fairy_tale", "bedtime") else str(fmt)
-            audio_label += f" — {kind} · {mins} мин · {voice}"
-        else:
-            audio_label += " (выкл)"
-        builder.row((audio_label, "ai:edit:tts_gen"))
+        if audio_allowed(max_user_id):
+            audio_label = "🎙 Аудио"
+            if audio_on:
+                from app.application.pipeline.tts_instructions import (
+                    TTS_INSTRUCTION_PRESET_LABELS,
+                )
+                from app.application.pipeline.tts_voices import (
+                    TTS_PROVIDER_SPEECHKIT,
+                    role_label,
+                    voice_label,
+                )
+
+                mins = story.get("target_minutes", 5)
+                provider = str(tts.get("provider") or "openai")
+                voice = tts.get("voice") or (
+                    "dasha" if provider == TTS_PROVIDER_SPEECHKIT else "shimmer"
+                )
+                speed = tts.get("speed", 0.9 if provider == TTS_PROVIDER_SPEECHKIT else 0.85)
+                fmt = story.get("format") or "fairy_tale"
+                kind = "сказка" if fmt in ("fairy_tale", "bedtime") else str(fmt)
+                prov_label = "SpeechKit" if provider == TTS_PROVIDER_SPEECHKIT else "OpenAI"
+                v_label = voice_label(provider, str(voice))
+                if provider == TTS_PROVIDER_SPEECHKIT:
+                    extra = role_label(str(tts.get("role") or "neutral"))
+                else:
+                    style_key = str(tts.get("instructions_preset") or "bedtime")
+                    extra = TTS_INSTRUCTION_PRESET_LABELS.get(style_key, style_key)
+                audio_label += (
+                    f" — {kind} · {mins} мин · {prov_label} · {v_label} · {speed} · {extra}"
+                )
+            else:
+                audio_label += " (выкл)"
+            builder.row((audio_label, "ai:edit:tts_gen"))
 
         post_enabled = blocks.get("post_gen", {}).get("enabled", False)
         post_mode = blocks.get("post_gen", {}).get("mode", "")
-        if audio_on:
-            post_label = "📋 Публикация поста"
+        if audio_on and audio_allowed(max_user_id):
+            post_label = "📋 Текст под аудио"
             if post_enabled:
-                post_label += " — CTA/ссылка"
+                post_label += " — призыв подписаться"
             else:
                 post_label += " (выкл)"
         else:
-            post_label = "📋 Генерация поста"
+            post_label = "📋 Текст поста"
             if post_enabled:
                 mode_display = "AI каждый запуск" if post_mode == "ai" else "Фикс. текст"
                 post_label += f" — {mode_display}"
@@ -317,23 +380,26 @@ class InlineKeyboardBuilder:
         builder.row((post_label, "ai:edit:post_gen"))
 
         queue = list((blocks.get("post_gen") or {}).get("topic_queue") or [])
-        queue_label = f"📚 Очередь тем ({len(queue)})"
+        queue_label = f"📚 Темы для постов ({len(queue)})"
         builder.row((queue_label, "ai:edit:topic_queue"))
+
+        # Schedule after topics — time setup is secondary to content themes.
+        builder.row((sched_label, "ai:edit:schedule"))
 
         can_start = False
         if sched_enabled and blocks.get("schedule", {}).get("times"):
             can_start = True
-        if rss_enabled and (rss_feeds or rss_sites):
+        if rss_allowed(max_user_id) and rss_enabled and (rss_feeds or rss_sites):
             can_start = True
 
         if pipeline_active:
-            builder.row(("🟢 Пайплайн запущен", "ai:pipeline:info"))
+            builder.row(("🟢 Автопостинг запущен", "ai:pipeline:info"))
             builder.row(("⏹ Остановить", "ai:pipeline:stop"))
         elif can_start:
-            builder.row(("▶ Запустить пайплайн", "ai:pipeline:start"))
+            builder.row(("▶ Запустить автопостинг", "ai:pipeline:start"))
 
         builder.row(("ℹ️ Информация", "ai:blocks:info"))
-        builder.row(("🧪 Тест", "ai:blocks:test"))
+        builder.row(("🧪 Тест (пример вам)", "ai:blocks:test"))
         builder.row(("На главную", "main_menu"))
         return builder.build()
 
@@ -343,6 +409,10 @@ class InlineKeyboardBuilder:
         feeds = list(block.get("feeds") or [])
         sites = list(block.get("sites") or [])
         interval = int(block.get("poll_interval_minutes") or 5)
+        try:
+            max_per_h = int(block.get("max_posts_per_hour", 3))
+        except (TypeError, ValueError):
+            max_per_h = 3
         include_n = len(block.get("include_keywords") or [])
         exclude_n = len(block.get("exclude_keywords") or [])
         niche = block.get("niche") or ""
@@ -352,6 +422,10 @@ class InlineKeyboardBuilder:
             str(block.get("publish_from_msk") or "09:00"),
             str(block.get("publish_until_msk") or "22:00"),
         )
+        if max_per_h <= 0:
+            rate_label = "без лимита"
+        else:
+            rate_label = f"{max_per_h}/час"
         builder = cls()
         builder.row(
             ("🟢 Включено" if enabled else "⚪ Выключено", "ai:block:news_rss:toggle")
@@ -368,10 +442,31 @@ class InlineKeyboardBuilder:
             prefix = "✅ " if mins == interval else ""
             builder.row((f"{prefix}Опрос: {label}", f"ai:block:news_rss:interval:{mins}"))
         builder.row((f"🕐 Окно: {window_label}", "ai:block:news_rss:window"))
+        builder.row((f"⏱ Лимит: {rate_label}", "ai:block:news_rss:rate"))
         builder.row((f"🎯 Тема / фильтр — {niche_label}", "ai:block:news_rss:filters"))
         builder.row((f"Слова: +{include_n} / −{exclude_n}", "ai:block:news_rss:filters"))
         builder.row(("Назад к блокам", "ai:back_to_blocks"))
         builder.row(("На главную", "main_menu"))
+        return builder.build()
+
+    @classmethod
+    def ai_news_rss_rate_select(cls, block: dict) -> dict[str, Any]:
+        try:
+            current = int(block.get("max_posts_per_hour", 3))
+        except (TypeError, ValueError):
+            current = 3
+        presets = (
+            (0, "Без лимита"),
+            (3, "3/час"),
+            (10, "10/час"),
+        )
+        builder = cls()
+        for value, label in presets:
+            prefix = "✅ " if value == current else ""
+            builder.row(
+                (f"{prefix}{label}", f"ai:block:news_rss:rate_set:{value}")
+            )
+        builder.row(("Назад", "ai:edit:news_rss"))
         return builder.build()
 
     @classmethod
@@ -381,18 +476,17 @@ class InlineKeyboardBuilder:
         cur_from = str(block.get("publish_from_msk") or "09:00")
         cur_until = str(block.get("publish_until_msk") or "22:00")
         presets = (
+            ("00:00", "00:00"),
             ("09:00", "22:00"),
             ("08:00", "23:00"),
             ("10:00", "20:00"),
-            ("00:00", "00:00"),
         )
         builder = cls()
         for fr, until in presets:
-            label = format_publish_window_label(fr, until)
             if fr == "00:00" and until == "00:00":
-                text = "Круглосуточно"
+                text = "Без окна (круглосуточно)"
             else:
-                text = label
+                text = format_publish_window_label(fr, until)
             prefix = "✅ " if fr == cur_from and until == cur_until else ""
             # payload uses dashes so split stays stable: window:09-00:22-00
             builder.row(
@@ -545,8 +639,8 @@ class InlineKeyboardBuilder:
     def ai_post_gen_link_toggle(cls) -> dict[str, Any]:
         return (
             cls()
-            .row(("✅ Да", "ai:block:post_gen:link:yes"))
-            .row(("❌ Нет", "ai:block:post_gen:link:no"))
+            .row(("✅ Да, добавить «Подпишись»", "ai:block:post_gen:link:yes"))
+            .row(("❌ Нет, без ссылки", "ai:block:post_gen:link:no"))
             .row(("Назад к блокам", "ai:back_to_blocks"))
             .row(("На главную", "main_menu"))
             .build()
@@ -673,11 +767,35 @@ class InlineKeyboardBuilder:
         return builder.build()
 
     @classmethod
-    def ai_tts_voice_select(cls, current: str = "shimmer") -> dict[str, Any]:
-        from app.bot.states.ai_studio import TTS_VOICES
-
+    def ai_tts_provider_select(cls, current: str = "speechkit") -> dict[str, Any]:
         builder = cls()
-        for voice_id, label in TTS_VOICES:
+        for pid, label in (
+            ("speechkit", "Yandex SpeechKit"),
+            ("openai", "OpenAI"),
+        ):
+            prefix = "✅ " if pid == current else ""
+            builder.row((f"{prefix}{label}", f"ai:block:tts_gen:provider:{pid}"))
+        builder.row(("Назад к блокам", "ai:back_to_blocks"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
+
+    @classmethod
+    def ai_tts_voice_select(
+        cls, current: str = "dasha", provider: str = "speechkit"
+    ) -> dict[str, Any]:
+        from app.application.pipeline.tts_voices import (
+            OPENAI_TTS_VOICES,
+            SPEECHKIT_VOICES,
+            TTS_PROVIDER_SPEECHKIT,
+        )
+
+        voices = (
+            SPEECHKIT_VOICES
+            if provider == TTS_PROVIDER_SPEECHKIT
+            else OPENAI_TTS_VOICES
+        )
+        builder = cls()
+        for voice_id, label in voices:
             prefix = "✅ " if voice_id == current else ""
             builder.row((f"{prefix}{label}", f"ai:block:tts_gen:voice:{voice_id}"))
         builder.row(("Назад к блокам", "ai:back_to_blocks"))
@@ -685,11 +803,44 @@ class InlineKeyboardBuilder:
         return builder.build()
 
     @classmethod
-    def ai_tts_speed_select(cls, current: float = 0.85) -> dict[str, Any]:
+    def ai_tts_speed_select(cls, current: float = 0.9) -> dict[str, Any]:
+        from app.application.pipeline.tts_voices import TTS_SPEEDS
+
         builder = cls()
-        for speed in (0.75, 0.85, 0.95, 1.0):
+        for speed in TTS_SPEEDS:
             prefix = "✅ " if abs(float(current) - speed) < 0.001 else ""
             builder.row((f"{prefix}{speed}", f"ai:block:tts_gen:speed:{speed}"))
+        builder.row(("Назад к блокам", "ai:back_to_blocks"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
+
+    @classmethod
+    def ai_tts_role_select(
+        cls, current: str = "neutral", voice: str = "dasha"
+    ) -> dict[str, Any]:
+        from app.application.pipeline.tts_voices import roles_for_voice
+
+        builder = cls()
+        for role_id, label in roles_for_voice(voice):
+            prefix = "✅ " if role_id == current else ""
+            builder.row((f"{prefix}{label}", f"ai:block:tts_gen:role:{role_id}"))
+        builder.row(("Назад к блокам", "ai:back_to_blocks"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
+
+    @classmethod
+    def ai_tts_instructions_select(cls, current: str = "bedtime") -> dict[str, Any]:
+        builder = cls()
+        for preset_id, label in (
+            ("bedtime", "🌙 На ночь"),
+            ("warm", "☀️ Тепло и живо"),
+            ("whisper", "🤫 Почти шёпотом"),
+            ("custom", "✏️ Свой стиль"),
+        ):
+            prefix = "✅ " if preset_id == current else ""
+            builder.row(
+                (f"{prefix}{label}", f"ai:block:tts_gen:style:{preset_id}")
+            )
         builder.row(("Назад к блокам", "ai:back_to_blocks"))
         builder.row(("На главную", "main_menu"))
         return builder.build()
@@ -710,7 +861,8 @@ class InlineKeyboardBuilder:
 
     @classmethod
     def ai_schedule_time_picker(cls, slot_info: str = "") -> dict[str, Any]:
-        header = f"{slot_info}\n" if slot_info else ""
+        # slot_info kept for call-site compat; shown in message text instead.
+        _ = slot_info
         return (
             cls()
             .row(

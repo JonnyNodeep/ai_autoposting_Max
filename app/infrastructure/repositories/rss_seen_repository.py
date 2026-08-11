@@ -36,19 +36,29 @@ class SQLARssSeenRepository:
         return result.scalar_one_or_none() is not None
 
     async def get_seen_guids_and_urls(self, channel_id: int) -> tuple[set[str], set[str]]:
+        guids, urls, _titles = await self.get_seen_keys(channel_id)
+        return guids, urls
+
+    async def get_seen_keys(
+        self, channel_id: int
+    ) -> tuple[set[str], set[str], set[str]]:
         stmt = select(
             RssSeenItemModel.item_guid,
             RssSeenItemModel.item_url,
+            RssSeenItemModel.title,
         ).where(RssSeenItemModel.channel_id == channel_id)
         result = await self._session.execute(stmt)
         guids: set[str] = set()
         urls: set[str] = set()
-        for guid, url in result.all():
+        titles: set[str] = set()
+        for guid, url, title in result.all():
             if guid:
                 guids.add(guid)
             if url:
                 urls.add(url)
-        return guids, urls
+            if title:
+                titles.add(title)
+        return guids, urls, titles
 
     async def count_published_since(self, channel_id: int, since: datetime) -> int:
         stmt = select(func.count()).select_from(RssSeenItemModel).where(

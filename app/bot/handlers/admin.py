@@ -31,7 +31,11 @@ def register_admin_handlers(dispatcher: UpdateDispatcher) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))
         user_data = cb.get("user", {}) or update.get("user", {})
-        max_user_id = user_data.get("user_id") or 0
+        max_user_id_raw = user_data.get("user_id") or user_data.get("id") or user_data.get("userId")
+        try:
+            max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else 0
+        except (TypeError, ValueError):
+            max_user_id = 0
 
         if not callback_data or not max_user_id:
             return

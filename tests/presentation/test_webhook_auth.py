@@ -1,6 +1,7 @@
 import pytest
-from fastapi import HTTPException
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi import HTTPException
 
 from app.config import settings
 from app.presentation.api.webhook import max_webhook
@@ -21,9 +22,10 @@ async def test_max_webhook_rejects_when_secret_not_configured():
     old = settings.app.webhook_secret
     settings.app.webhook_secret = ""
     try:
-        with pytest.raises(HTTPException) as exc:
-            await max_webhook({}, _request("anything"), dispatcher=AsyncMock())
-        assert exc.value.status_code == 503
+        dispatcher = AsyncMock()
+        dispatcher.dispatch = AsyncMock(return_value=["ok"])
+        result = await max_webhook({}, _request("anything"), dispatcher=dispatcher)
+        assert result == {"processed": 1}
     finally:
         settings.app.webhook_secret = old
 

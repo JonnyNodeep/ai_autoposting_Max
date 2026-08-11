@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Рассылка {{ bc.id }}{% endblock %}
+{% block content %}
+<h2>Рассылка #{{ bc.id }}</h2>
+<div class="card">
+  <p>Сегмент: <strong>{{ bc.segment }}</strong> · Статус: <strong>{{ bc.status }}</strong></p>
+  <p>Прогресс: {{ bc.sent }}/{{ bc.total }} · ошибки {{ bc.failed }}</p>
+  <pre style="white-space:pre-wrap">{{ bc.text }}</pre>
+  {% if bc.status == "draft" %}
+  <form method="post" action="/admin/broadcasts/{{ bc.id }}/send">
+    <button type="submit">Отправить сейчас</button>
+  </form>
+  {% endif %}
+</div>
+<div class="card">
+  <h3>Доставки</h3>
+  <table>
+    <thead><tr><th>max_user_id</th><th>Статус</th><th>Ошибка</th></tr></thead>
+    <tbody>
+      {% for d in deliveries %}
+      <tr>
+        <td>{{ d.max_user_id }}</td>
+        <td>{{ d.status }}</td>
+        <td class="muted">{{ d.error or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p><a href="/admin/broadcasts">← Назад</a></p>
+{% endblock %}

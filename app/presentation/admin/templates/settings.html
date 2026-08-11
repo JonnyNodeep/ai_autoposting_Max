@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Настройки{% endblock %}
+{% block content %}
+<h2>Настройки</h2>
+<div class="card">
+  <h3>Цены тарифов</h3>
+  <form method="post" action="/admin/settings/prices" class="stack">
+    {% for tier in ["solo", "creator", "studio"] %}
+    <div class="row">
+      <strong style="width:6rem">{{ tier }}</strong>
+      <label>база <input type="number" name="base_{{ tier }}" value="{{ prices.base[tier] }}" /></label>
+      <label>за пост <input type="number" name="per_{{ tier }}" value="{{ prices.per_post[tier] }}" /></label>
+      <label>каналы <input type="number" name="ch_{{ tier }}" value="{{ prices.channels[tier] }}" /></label>
+    </div>
+    {% endfor %}
+    <label>варианты posts_per_day (через запятую)
+      <input name="ppd_options" value="{{ prices.posts_per_day_options|join(',') }}" />
+    </label>
+    <button type="submit">Сохранить цены</button>
+  </form>
+</div>
+<div class="card">
+  <h3>Whitelist фич (max_user_id через запятую)</h3>
+  <form method="post" action="/admin/settings/features" class="stack">
+    <label>RSS <input name="rss" value="{{ rss }}" /></label>
+    <label>Видео <input name="video" value="{{ video }}" /></label>
+    <label>Аудио <input name="audio" value="{{ audio }}" /></label>
+    <button type="submit">Сохранить whitelist</button>
+  </form>
+  <p class="muted">Объединяются с значениями из .env</p>
+</div>
+{% endblock %}

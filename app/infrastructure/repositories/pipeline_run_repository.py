@@ -64,6 +64,31 @@ class SQLAPipelineRunRepository:
         models = result.scalars().all()
         return [self._to_entity(m) for m in models]
 
+    async def list_active_by_user(self, user_id: int) -> list[PipelineRun]:
+        stmt = (
+            select(PipelineRunModel)
+            .where(
+                PipelineRunModel.user_id == user_id,
+                PipelineRunModel.status == PipelineStatus.ACTIVE.value,
+            )
+            .order_by(PipelineRunModel.id.desc())
+        )
+        result = await self._session.execute(stmt)
+        return [self._to_entity(m) for m in result.scalars().all()]
+
+    async def stop_all_active_by_user(self, user_id: int) -> list[int]:
+        runs = await self.list_active_by_user(user_id)
+        ids = [r.id for r in runs if r.id is not None]
+        if not ids:
+            return []
+        await self._session.execute(
+            update(PipelineRunModel)
+            .where(PipelineRunModel.id.in_(ids))
+            .values(status=PipelineStatus.STOPPED.value)
+        )
+        await self._session.flush()
+        return ids
+
     async def create(self, run: PipelineRun) -> PipelineRun:
         model = PipelineRunModel(
             user_id=run.user_id,

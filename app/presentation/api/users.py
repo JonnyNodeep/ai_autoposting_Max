@@ -43,5 +43,8 @@ async def get_user_subscription(user_id: int) -> SubscriptionResponse:
             tier=sub.tier.value,
             status=sub.status.value,
             channels_limit=sub.channels_limit,
+            posts_per_day=sub.posts_per_day,
+            generations_quota=sub.generations_quota,
+            generations_used=sub.generations_used,
             expires_at=sub.expires_at.isoformat(),
         )

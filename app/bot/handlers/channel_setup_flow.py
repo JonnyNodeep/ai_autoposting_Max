@@ -22,6 +22,7 @@ from app.bot.handlers.telegram_bind_ui import (
 )
 from app.bot.handlers.time_utils import parse_time_hh_mm
 from app.bot.keyboards.builder import InlineKeyboardBuilder
+from app.bot.texts.studio_hints import FINISH_SETUP_HINT
 from app.bot.states.channel_setup import ChannelSetupFSM, SetupStep
 from app.infrastructure.database.session import async_session_factory
 from app.infrastructure.redis.client import get_redis
@@ -51,7 +52,7 @@ FREQ_NAMES = {
     "3x_day": "3 раза в день",
 }
 
-REDIS_TTL = 300
+REDIS_TTL = 3600
 
 
 _parse_time = parse_time_hh_mm
@@ -61,9 +62,22 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
     @dispatcher.register(UpdateType.MESSAGE_CREATED)
     async def on_message_created(update: dict) -> None:
         msg = update.get("message", {})
-        sender = msg.get("sender", {}) or update.get("user", {})
-        max_user_id = sender.get("user_id")
-        username = sender.get("username")
+        user_obj = update.get("user", {}) or {}
+        sender = msg.get("sender", {}) or {}
+        max_user_id_raw = (
+            sender.get("user_id")
+            or sender.get("id")
+            or sender.get("userId")
+            or user_obj.get("user_id")
+            or user_obj.get("id")
+            or user_obj.get("userId")
+        )
+        try:
+            max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else None
+        except (TypeError, ValueError):
+            max_user_id = None
+
+        username = sender.get("username") or user_obj.get("username")
         first_name = sender.get("first_name", "")
         last_name = sender.get("last_name")
         recipient = msg.get("recipient", {})
@@ -71,7 +85,10 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
 
         chat_id = update.get("chat_id") or recipient.get("chat_id")
         if not max_user_id:
-            logger.warning("message_created without user_id")
+            logger.warning(
+                "message_created without user_id; user_obj_keys="
+                f"{list(user_obj.keys())[:5]} sender_keys={list(sender.keys())[:5]}"
+            )
             return
 
         async with async_session_factory() as session:
@@ -104,15 +121,27 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
 
                 redis = await get_redis()
-                if await redis.get(f"ai_image_prompt_wait:{max_user_id}"):
+                from app.bot.ai_studio_text_input import (
+                    SCHEDULE_CUSTOM_HINT,
+                    has_pending_studio_text_input,
+                    is_ai_studio_session_active,
+                )
+
+                if await has_pending_studio_text_input(redis, max_user_id):
                     return
-                if await redis.get(f"ai_video_prompt_wait:{max_user_id}"):
-                    return
-                if await redis.get(f"ai_post_gen_wait:{max_user_id}"):
-                    return
-                if await redis.get(f"ai_topic_queue_wait:{max_user_id}"):
-                    return
-                if await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
+
+                # Mid schedule-slot picker: text without «Своё время» — hint, never main menu.
+                if message_text and await redis.get(f"ai_schedule_slots:{max_user_id}"):
+                    if not await redis.get(f"ai_schedule_custom_time:{max_user_id}"):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text=SCHEDULE_CUSTOM_HINT,
+                        )
+                        await max_client.close()
+                        return
+
+                if await is_ai_studio_session_active(redis, max_user_id):
+                    await max_client.close()
                     return
 
                 async def _setup_done() -> None:
@@ -251,12 +280,17 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     await max_client.close()
                     return
 
-                await max_client.send_message_to_user(
-                    user_id=max_user_id,
-                    text="Выбери действие:",
-                    attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
-                    fmt="markdown",
-                )
+                # Channel setup multi-slot: typed time without «Своё время».
+                if message_text and await redis.get(f"setup_slots:{max_user_id}"):
+                    if not await redis.get(f"setup_slot_custom:{max_user_id}"):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text=SCHEDULE_CUSTOM_HINT,
+                        )
+                        await max_client.close()
+                        return
+
+                # Do not dump unmatched DMs to main menu — that fights AI Studio / wizards.
                 await max_client.close()
                 return
 
@@ -302,7 +336,15 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))
         user_data = cb.get("user", {}) or update.get("user", {}) or update.get("message", {}).get("sender", {})
-        max_user_id = user_data.get("user_id")
+        max_user_id_raw = (
+            user_data.get("user_id")
+            or user_data.get("id")
+            or user_data.get("userId")
+        )
+        try:
+            max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else None
+        except (TypeError, ValueError):
+            max_user_id = None
 
         if not callback_data or not max_user_id:
             return
@@ -840,7 +882,7 @@ async def finish_setup(
         user_id=max_user_id,
         text=(
             "Настройка канала завершена!\n\n"
-            "Дальше настрой автопостинг в *AI Content Studio*."
+            f"{FINISH_SETUP_HINT}"
         ),
         attachments=[builder.build()],
         fmt="markdown",
@@ -872,6 +914,14 @@ async def _process_slot_time(max_user_id, ch_id, slot_idx, time_str, channel_rep
     redis_local = await get_redis()
     raw = await redis_local.get(f"setup_slots:{max_user_id}")
     if not raw:
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "Сессия слотов истекла (слишком долгий перерыв).\n"
+                "Начни настройку частоты/времени заново из меню канала."
+            ),
+            attachments=[InlineKeyboardBuilder.main_menu(max_user_id)],
+        )
         return
     state = json.loads(raw)
     state["times"].append(time_str)

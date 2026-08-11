@@ -19,7 +19,7 @@ from app.bot.handlers.ai_studio_topic_queue import (
     handle_topic_queue_callback,
     handle_topic_queue_message,
 )
-from app.bot.handlers.ai_studio_tts import handle_tts_callback
+from app.bot.handlers.ai_studio_tts import handle_tts_callback, handle_tts_instructions_message
 from app.bot.handlers.ai_studio_video import handle_video_callback, handle_video_message
 
 
@@ -29,7 +29,15 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
         cb = update.get("callback", {})
         callback_data = str(cb.get("payload", ""))
         user_data = cb.get("user", {}) or update.get("user", {}) or update.get("message", {}).get("sender", {})
-        max_user_id = user_data.get("user_id")
+        max_user_id_raw = (
+            user_data.get("user_id")
+            or user_data.get("id")
+            or user_data.get("userId")
+        )
+        try:
+            max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else None
+        except (TypeError, ValueError):
+            max_user_id = None
 
         if not callback_data or not max_user_id:
             return
@@ -100,8 +108,20 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
     @dispatcher.register(UpdateType.MESSAGE_CREATED)
     async def on_ai_studio_message(update: dict) -> None:
         msg = update.get("message", {})
-        sender = msg.get("sender", {}) or update.get("user", {})
-        max_user_id = sender.get("user_id")
+        user_obj = update.get("user", {}) or {}
+        sender = msg.get("sender", {}) or {}
+        max_user_id_raw = (
+            sender.get("user_id")
+            or sender.get("id")
+            or sender.get("userId")
+            or user_obj.get("user_id")
+            or user_obj.get("id")
+            or user_obj.get("userId")
+        )
+        try:
+            max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else None
+        except (TypeError, ValueError):
+            max_user_id = None
         message_text = (msg.get("body") or {}).get("text", "")
 
         if not max_user_id or not message_text:
@@ -112,6 +132,8 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
         if await handle_image_message(max_user_id, message_text, redis):
             return
         if await handle_video_message(max_user_id, message_text, redis):
+            return
+        if await handle_tts_instructions_message(max_user_id, message_text, redis):
             return
         if await handle_story_message(max_user_id, message_text, redis):
             return

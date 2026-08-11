@@ -9,6 +9,7 @@ TextInputKind = Literal[
     "video_prompt",
     "post_gen",
     "story_gen",
+    "tts_instructions",
     "schedule_custom",
     "schedule_slot_prompt",
     "rss_feed",
@@ -23,6 +24,7 @@ _WAIT_KEYS: dict[TextInputKind, str] = {
     "video_prompt": "ai_video_prompt_wait",
     "post_gen": "ai_post_gen_wait",
     "story_gen": "ai_story_gen_wait",
+    "tts_instructions": "ai_tts_instructions_wait",
     "schedule_custom": "ai_schedule_custom_time",
     "schedule_slot_prompt": "ai_schedule_slot_prompt_wait",
     "rss_feed": "ai_rss_feed_wait",
@@ -43,6 +45,27 @@ _REVIEW_KEYS: dict[TextInputKind, str] = {
 
 def _key(prefix: str, user_id: int) -> str:
     return f"{prefix}:{user_id}"
+
+
+async def has_pending_studio_text_input(redis, user_id: int) -> bool:
+    """True if AI Studio is waiting for (or reviewing) text from this user."""
+    keys = [_key(prefix, user_id) for prefix in _WAIT_KEYS.values()]
+    keys.extend(_key(prefix, user_id) for prefix in _REVIEW_KEYS.values())
+    if not keys:
+        return False
+    return bool(await redis.exists(*keys))
+
+
+async def is_ai_studio_session_active(redis, user_id: int) -> bool:
+    """True while user is in AI Studio FSM and/or mid schedule-slot wizard."""
+    if await redis.exists(f"ai_studio:{user_id}", f"ai_schedule_slots:{user_id}"):
+        return True
+    return await has_pending_studio_text_input(redis, user_id)
+
+
+SCHEDULE_CUSTOM_HINT = (
+    'Если хотите ввести своё время, сначала нажмите кнопку «Своё время».'
+)
 
 
 async def clear_text_inputs(redis, user_id: int, *, except_kind: TextInputKind | None = None) -> None:

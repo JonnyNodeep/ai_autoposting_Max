@@ -21,6 +21,7 @@ from app.bot.handlers.ai_studio_entry import (
     _show_blocks,
 )
 from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
+from app.bot.texts.studio_hints import SUBSCRIBE_CTA_INTRO
 
 
 async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
@@ -78,9 +79,11 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                f"📋 *Генерация поста — выбор режима*\n\n"
+                f"📋 *Текст поста — выбор режима*\n\n"
                 f"Текущий: "
-                f"{'AI (каждый запуск)' if current_mode == 'ai' else 'Готовый текст'}"
+                f"{'AI (новый пост каждый запуск)' if current_mode == 'ai' else 'Готовый текст (один и тот же)'}\n\n"
+                "*AI* — бот пишет новый пост при каждом выходе.\n"
+                "*Готовый текст* — один и тот же текст каждый раз."
             ),
             attachments=[InlineKeyboardBuilder.ai_post_gen_mode_select()],
             fmt="markdown",
@@ -102,8 +105,9 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                f"📋 *Генерация поста — {mode_display}*\n\n"
-                f"🔗 Добавить ссылку на канал?"
+                f"📋 *Текст поста — {mode_display}*\n\n"
+                f"{SUBSCRIBE_CTA_INTRO}\n\n"
+                "Добавить призыв подписаться на канал?"
             ),
             attachments=[InlineKeyboardBuilder.ai_post_gen_link_toggle()],
             fmt="markdown",
@@ -123,12 +127,26 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         logger.info(f"AI Studio post_gen link: mode={mode}, block_keys={list(block.keys())}")
         await fsm.set_block_data(max_user_id, "post_gen", {"add_channel_link": link == "yes"})
 
+        channel = None
+        if state.get("channel_id"):
+            channel = await channel_repo.get_by_id(state["channel_id"])
+        if link == "yes" and channel and not (channel.channel_link or "").strip():
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    "Ссылка на канал пока не известна — бот подставит её, "
+                    "когда канал полностью подключён. "
+                    "Если ссылка не появится, проверьте, что бот — админ канала."
+                ),
+            )
+
         if mode == "ai":
             await max_client.send_message_to_user(
                 user_id=max_user_id,
                 text=(
-                    "📋 *Генерация поста — AI*\n\n"
-                    "Жирный заголовок и подзаголовки?"
+                    "📋 *Текст поста — AI*\n\n"
+                    "Жирный заголовок и подзаголовки помогают читать длинные посты.\n\n"
+                    "Использовать жирный для заголовков?"
                 ),
                 attachments=[InlineKeyboardBuilder.ai_post_gen_bold_toggle()],
                 fmt="markdown",
@@ -150,7 +168,8 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                "📋 *Генерация поста — AI*\n\n"
+                "📋 *Текст поста — AI*\n\n"
+                "Эмодзи добавляют живости — можно отключить для строгого тона.\n\n"
                 "Нужны ли эмодзи?"
             ),
             attachments=[InlineKeyboardBuilder.ai_post_gen_emoji_toggle()],
@@ -170,7 +189,8 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                "📋 *Генерация поста — AI*\n\n"
+                "📋 *Текст поста — AI*\n\n"
+                "Если в канале подключены комментарии — бот учтёт это в тексте.\n\n"
                 "Комментарии в канале подключены?\n\n"
                 "Если нет — бот не будет просить читателей писать ответы "
                 "и вместо этого предложит ставить реакции."
