@@ -30,6 +30,18 @@ class SQLAPipelineRunRepository:
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
 
+    async def get_latest_by_channel(self, channel_id: int) -> PipelineRun | None:
+        """Latest run for channel regardless of status (active or stopped)."""
+        stmt = (
+            select(PipelineRunModel)
+            .where(PipelineRunModel.channel_id == channel_id)
+            .order_by(PipelineRunModel.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
     async def list_active_by_channel(self, channel_id: int) -> list[PipelineRun]:
         stmt = (
             select(PipelineRunModel)

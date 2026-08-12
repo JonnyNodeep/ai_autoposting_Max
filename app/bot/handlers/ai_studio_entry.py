@@ -130,7 +130,8 @@ async def handle_entry_callback(
         from app.application.pipeline.normalize import steps_to_ui_dict
         from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 
-        active_run = await SQLAPipelineRunRepository(session).get_active_by_channel(channel_id)
+        run_repo = SQLAPipelineRunRepository(session)
+        active_run = await run_repo.get_active_by_channel(channel_id)
         if active_run and active_run.blocks_config:
             ui_blocks = steps_to_ui_dict(active_run.blocks_config)
             ui_blocks = sanitize_premium_blocks(ui_blocks, max_user_id)
@@ -142,6 +143,18 @@ async def handle_entry_callback(
                 pipes[str(channel_id)] = {k: dict(v) for k, v in ui_blocks.items()}
                 await fsm.set_data(max_user_id, {"pipelines": pipes})
                 state = await fsm.get_state(max_user_id)
+        elif str(channel_id) not in (state.get("pipelines") or {}):
+            latest_run = await run_repo.get_latest_by_channel(channel_id)
+            if latest_run and latest_run.blocks_config:
+                ui_blocks = steps_to_ui_dict(latest_run.blocks_config)
+                ui_blocks = sanitize_premium_blocks(ui_blocks, max_user_id)
+                await fsm.set_data(max_user_id, {"blocks": ui_blocks})
+                state = await fsm.get_state(max_user_id)
+                if state is not None:
+                    pipes = state.get("pipelines") or {}
+                    pipes[str(channel_id)] = {k: dict(v) for k, v in ui_blocks.items()}
+                    await fsm.set_data(max_user_id, {"pipelines": pipes})
+                    state = await fsm.get_state(max_user_id)
 
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
