@@ -34,6 +34,10 @@ DEFAULT_NEWS_RSS: dict[str, Any] = {
     "keywords_source": "",
 }
 
+RSS_KEYWORDS_MAX = 250
+MAX_BOT_MESSAGE_CHARS = 4000
+RSS_KEYWORD_SECTION_MAX_CHARS = 1400
+
 MSK_OFFSET_HOURS = 3
 _HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
 
@@ -134,7 +138,196 @@ def _clean_keyword_list(raw: Any) -> list[str]:
             continue
         seen.add(key)
         out.append(word)
-    return out[:40]
+    return out[:RSS_KEYWORDS_MAX]
+
+
+_KW_SECTION_RE = re.compile(
+    r"^\s*(?P<label>"
+    r"\+|−|-|–|—|"
+    r"include|exclude|"
+    r"включ(?:ать|ить)?|исключ(?:ать|ить)?"
+    r")\s*[:：]?\s*(?P<body>.*)$",
+    re.IGNORECASE,
+)
+_KW_INLINE_SPLIT_RE = re.compile(
+    r"(?=(?:(?:\+|−|-|–|—|include|exclude|включ\w*|исключ\w*)\s*[:：]))",
+    re.IGNORECASE,
+)
+_KW_UI_SKIP_RE = re.compile(
+    r"(?:"
+    r"ручное\s+редактирование|"
+    r"пришли\s+одним\s+сообщением|"
+    r"пустой\s+[`']?\+:|"
+    r"если\s+указать\s+только\s+одну\s+строку"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _clean_keyword_edit_line(line: str) -> str:
+    return (line or "").strip().strip("`").strip("*").strip()
+
+
+def _preprocess_keywords_edit_text(text: str) -> str:
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        cleaned = _clean_keyword_edit_line(line)
+        if not cleaned:
+            continue
+        if _KW_UI_SKIP_RE.search(cleaned):
+            continue
+        out.append(cleaned)
+    return "\n".join(out)
+
+
+def _truncate_joined_keywords(words: list[str], *, max_chars: int) -> str:
+    joined = ", ".join(words)
+    if len(joined) <= max_chars:
+        return joined
+    parts: list[str] = []
+    length = 0
+    for word in words:
+        sep = ", " if parts else ""
+        if length + len(sep) + len(word) > max_chars - 24:
+            break
+        parts.append(word)
+        length += len(sep) + len(word)
+    hidden = len(words) - len(parts)
+    suffix = f" … и ещё {hidden}" if hidden else "…"
+    return ", ".join(parts) + suffix
+
+
+def format_rss_keyword_lists_text(
+    include: list[str],
+    exclude: list[str],
+    *,
+    per_section_max: int = RSS_KEYWORD_SECTION_MAX_CHARS,
+) -> str:
+    if include:
+        inc = _truncate_joined_keywords(include, max_chars=per_section_max)
+    else:
+        inc = "— (все, кроме исключений)"
+    exc = (
+        _truncate_joined_keywords(exclude, max_chars=per_section_max)
+        if exclude
+        else "—"
+    )
+    return f"*Включать (+):*\n{inc}\n\n*Исключать (−):*\n{exc}"
+
+
+def keyword_edit_line_preview(words: list[str], *, max_chars: int = 350) -> str:
+    if not words:
+        return ""
+    joined = ", ".join(words)
+    if len(joined) <= max_chars:
+        return joined
+    return _truncate_joined_keywords(words, max_chars=max_chars)
+
+
+def _split_keyword_tokens(text: str) -> list[str]:
+    parts = re.split(r"[,;\n]+", text or "")
+    return _clean_keyword_list([p.strip() for p in parts if p.strip()])
+
+
+def _keyword_section_kind(label: str) -> str | None:
+    low = (label or "").casefold().strip()
+    if low in ("+", "include") or low.startswith("включ"):
+        return "include"
+    if low in ("-", "−", "–", "—", "exclude") or low.startswith("исключ"):
+        return "exclude"
+    return None
+
+
+def _has_keyword_section_markers(text: str) -> bool:
+    if _KW_INLINE_SPLIT_RE.search(text):
+        return True
+    for line in text.splitlines():
+        cleaned = _clean_keyword_edit_line(line)
+        if cleaned and _KW_SECTION_RE.match(cleaned):
+            return True
+    return False
+
+
+def parse_keywords_edit_text(
+    text: str,
+    *,
+    allow_plain_include: bool = False,
+) -> tuple[list[str] | None, list[str] | None] | None:
+    """Parse manual keyword edit into ``(include, exclude)``.
+
+    Each side is a list if that section was present (empty list clears it),
+    or ``None`` if the section was omitted (caller keeps previous value).
+
+    Accepted forms::
+
+        +: word1, word2
+        -: spam1, spam2
+
+        include: a, b
+        exclude: c
+
+    With ``allow_plain_include``, a message without section markers is treated
+    as an include-only list (exclude stays unchanged by the caller).
+
+    Returns ``None`` if no section markers found.
+    """
+    raw = _preprocess_keywords_edit_text(text)
+    if not raw:
+        return None
+
+    if allow_plain_include and not _has_keyword_section_markers(raw):
+        return _split_keyword_tokens(raw), None
+
+    include_seen = False
+    exclude_seen = False
+    current: str | None = None
+    buffers: dict[str, list[str]] = {"include": [], "exclude": []}
+
+    def _apply_chunk(chunk: str, *, allow_continuation: bool) -> bool:
+        nonlocal include_seen, exclude_seen, current
+        stripped = chunk.strip()
+        if not stripped:
+            return True
+        match = _KW_SECTION_RE.match(stripped)
+        if match:
+            kind = _keyword_section_kind(match.group("label"))
+            if kind is None:
+                return False
+            current = kind
+            if kind == "include":
+                include_seen = True
+            else:
+                exclude_seen = True
+            body = (match.group("body") or "").strip()
+            if body:
+                buffers[kind].append(body)
+            return True
+        if allow_continuation and current is not None:
+            buffers[current].append(stripped)
+            return True
+        return False
+
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if len(lines) <= 1 and _KW_INLINE_SPLIT_RE.search(raw):
+        parts = [p for p in _KW_INLINE_SPLIT_RE.split(raw) if p and p.strip()]
+        if not parts:
+            parts = [raw]
+        for part in parts:
+            if not _apply_chunk(part, allow_continuation=False):
+                return None
+    else:
+        for line in lines:
+            if not _apply_chunk(line, allow_continuation=True):
+                return None
+
+    if not include_seen and not exclude_seen:
+        if allow_plain_include:
+            return _split_keyword_tokens(raw), None
+        return None
+
+    include = _split_keyword_tokens("\n".join(buffers["include"])) if include_seen else None
+    exclude = _split_keyword_tokens("\n".join(buffers["exclude"])) if exclude_seen else None
+    return include, exclude
 
 
 def parse_hhmm(value: Any, *, default: str) -> str:
@@ -1276,11 +1469,7 @@ def format_keywords_review(
     if reason:
         lines.append(reason)
         lines.append("")
-    inc = ", ".join(include) if include else "— (все, кроме исключений)"
-    exc = ", ".join(exclude) if exclude else "—"
-    lines.append(f"*Включать (+):*\n{inc}")
-    lines.append("")
-    lines.append(f"*Исключать (−):*\n{exc}")
+    lines.append(format_rss_keyword_lists_text(include, exclude))
     lines.append("")
     lines.append("Утверди набор или переделай.")
     return "\n".join(lines)

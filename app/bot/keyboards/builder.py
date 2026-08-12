@@ -513,10 +513,21 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
+    def ai_news_rss_filters_menu(cls, *, has_keywords: bool) -> dict[str, Any]:
+        builder = cls()
+        if has_keywords:
+            builder.row(("👁 Показать текущие", "ai:block:news_rss:kw:show"))
+        builder.row(("✏️ Править вручную", "ai:block:news_rss:kw:edit_manual"))
+        builder.row(("🤖 Подобрать заново (ИИ)", "ai:block:news_rss:kw:pick_ai"))
+        builder.row(("Назад", "ai:edit:news_rss"))
+        return builder.build()
+
+    @classmethod
     def ai_news_rss_keywords_review(cls) -> dict[str, Any]:
         return (
             cls()
             .row(("✅ Применить", "ai:block:news_rss:kw:approve"))
+            .row(("✏️ Править вручную", "ai:block:news_rss:kw:edit_manual"))
             .row(("🔄 Переделать", "ai:block:news_rss:kw:regen"))
             .row(("✏️ Другое описание темы", "ai:block:news_rss:kw:edit_brief"))
             .row(("Назад", "ai:edit:news_rss"))

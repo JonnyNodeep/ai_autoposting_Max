@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.application.pipeline.rss_monitor import (
+    RSS_KEYWORDS_MAX,
     RssNewsItem,
     filter_new_items,
     format_keywords_review,
@@ -79,6 +80,15 @@ def test_normalize_news_rss_defaults_and_keywords():
     assert n["niche"] == "crypto"
     assert n["publish_from_msk"] == "09:00"
     assert n["publish_until_msk"] == "22:00"
+
+
+def test_normalize_news_rss_keyword_limit():
+    words = [f"word{i}" for i in range(RSS_KEYWORDS_MAX + 50)]
+    n = normalize_news_rss({"include_keywords": words, "exclude_keywords": words})
+    assert len(n["include_keywords"]) == RSS_KEYWORDS_MAX
+    assert len(n["exclude_keywords"]) == RSS_KEYWORDS_MAX
+    assert n["include_keywords"][0] == "word0"
+    assert n["include_keywords"][-1] == f"word{RSS_KEYWORDS_MAX - 1}"
 
 
 def test_normalize_preserves_publish_window():
@@ -165,6 +175,57 @@ def test_parse_publish_window_text():
     assert parse_publish_window_text("10.00-20.00") == ("10:00", "20:00")
     assert parse_publish_window_text("bad") is None
     assert parse_publish_window_text("25:00-22:00") is None
+
+
+def test_parse_keywords_edit_text():
+    from app.application.pipeline.rss_monitor import parse_keywords_edit_text
+
+    assert parse_keywords_edit_text("") is None
+    assert parse_keywords_edit_text("просто слова без меток") is None
+
+    both = parse_keywords_edit_text(
+        "+: Екатеринбург, Екб, Урал\n-: реклама, вакансия"
+    )
+    assert both == (["Екатеринбург", "Екб", "Урал"], ["реклама", "вакансия"])
+
+    only_plus = parse_keywords_edit_text("+: метро, ЖКХ")
+    assert only_plus == (["метро", "ЖКХ"], None)
+
+    only_minus = parse_keywords_edit_text("-: розыгрыш; промокод")
+    assert only_minus == (None, ["розыгрыш", "промокод"])
+
+    clear_include = parse_keywords_edit_text("+:\n-: спам")
+    assert clear_include == ([], ["спам"])
+
+    inline = parse_keywords_edit_text("+: a, b -: c")
+    assert inline == (["a", "b"], ["c"])
+
+    ru = parse_keywords_edit_text("включать: парк\nисключать: реклама")
+    assert ru == (["парк"], ["реклама"])
+
+    cont = parse_keywords_edit_text("+:\nЕкатеринбург\nУрал\n-:\nреклама")
+    assert cont == (["Екатеринбург", "Урал"], ["реклама"])
+
+    pasted = parse_keywords_edit_text(
+        "✏️ Ручное редактирование фильтра\n"
+        "Пришли одним сообщением (можно править списки ниже):\n"
+        "+: Екатеринбург, Екб\n"
+        "-: реклама"
+    )
+    assert pasted == (["Екатеринбург", "Екб"], ["реклама"])
+
+    plain = parse_keywords_edit_text("Екатеринбург\nЕкб", allow_plain_include=True)
+    assert plain == (["Екатеринбург", "Екб"], None)
+    assert parse_keywords_edit_text("Екатеринбург\nЕкб") is None
+
+
+def test_format_rss_keyword_lists_text_truncates_long_lists():
+    from app.application.pipeline.rss_monitor import format_rss_keyword_lists_text
+
+    include = [f"word{i}" for i in range(80)]
+    text = format_rss_keyword_lists_text(include, ["spam"], per_section_max=120)
+    assert "… и ещё" in text
+    assert len(text) < 400
 
 
 def test_is_rss_trigger():

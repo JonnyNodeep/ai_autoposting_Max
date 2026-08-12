@@ -14,6 +14,14 @@ from tenacity import (
 from app.config import settings
 from app.domain.interfaces.max_client import MaxAPIClient
 
+MAX_MESSAGE_TEXT_LEN = 4000
+
+
+def _clip_message_text(text: str, limit: int = MAX_MESSAGE_TEXT_LEN) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
 
 def _get_verify_path() -> str | bool:
     cert_path = Path(__file__).parent.parent.parent.parent / "certs" / "russian_trusted_root_ca.pem"
@@ -93,7 +101,7 @@ class MaxAPIHTTPClient(MaxAPIClient):
         attachments: list[dict[str, Any]] | None = None,
         fmt: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"text": text}
+        body: dict[str, Any] = {"text": _clip_message_text(text)}
         if attachments:
             body["attachments"] = attachments
         if fmt:
@@ -108,7 +116,7 @@ class MaxAPIHTTPClient(MaxAPIClient):
         attachments: list[dict[str, Any]] | None = None,
         fmt: str | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"text": text}
+        body: dict[str, Any] = {"text": _clip_message_text(text)}
         if attachments:
             body["attachments"] = attachments
         if fmt:

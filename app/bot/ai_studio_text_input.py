@@ -18,6 +18,7 @@ TextInputKind = Literal[
     "rss_site",
     "rss_window",
     "rss_topic_brief",
+    "rss_keywords_edit",
     "topic_queue",
     # Channel setup
     "style_prompt",
@@ -44,6 +45,7 @@ _WAIT_KEYS: dict[TextInputKind, str] = {
     "rss_site": "ai_rss_site_wait",
     "rss_window": "ai_rss_window_wait",
     "rss_topic_brief": "ai_rss_topic_brief_wait",
+    "rss_keywords_edit": "ai_rss_keywords_edit_wait",
     "topic_queue": "ai_topic_queue_wait",
     "style_prompt": "style_prompt",
     "setup_refpost": "setup_refpost",
@@ -89,6 +91,7 @@ STUDIO_TEXT_KINDS: frozenset[TextInputKind] = frozenset(
         "rss_site",
         "rss_window",
         "rss_topic_brief",
+        "rss_keywords_edit",
         "topic_queue",
     }
 )

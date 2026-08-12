@@ -6,9 +6,12 @@ from app.application.pipeline.rss_monitor import (
     NICHE_LABELS,
     format_keywords_review,
     format_publish_window_label,
+    format_rss_keyword_lists_text,
     generate_keywords_for_topic,
+    keyword_edit_line_preview,
     normalize_news_rss,
     parse_hhmm,
+    parse_keywords_edit_text,
     parse_publish_window_text,
     resolve_site_add,
 )
@@ -46,6 +49,59 @@ def _normalize_feed_url(text: str) -> str:
 
 def _kw_review_key(user_id: int) -> str:
     return f"ai_rss_kw_review:{user_id}"
+
+
+def _format_keywords_lists(include: list[str], exclude: list[str]) -> str:
+    return format_rss_keyword_lists_text(include, exclude)
+
+
+def _keywords_edit_prompt(include: list[str], exclude: list[str]) -> str:
+    inc_n = len(include)
+    exc_n = len(exclude)
+    joined_len = len(", ".join(include + exclude))
+    if inc_n + exc_n > 12 or joined_len > 400:
+        return (
+            "✏️ *Ручное редактирование фильтра*\n\n"
+            "Пришли одним сообщением в формате:\n\n"
+            "`+:`\n"
+            "слово1\n"
+            "слово2\n"
+            "`-:`\n"
+            "исключ1\n\n"
+            f"Сейчас в фильтре: +{inc_n} / −{exc_n} слов.\n"
+            "Пустой `+:` или `-:` очищает список.\n"
+            "Если указать только одну секцию — вторая останется как была."
+        )
+    inc_line = keyword_edit_line_preview(include)
+    exc_line = keyword_edit_line_preview(exclude)
+    return (
+        "✏️ *Ручное редактирование фильтра*\n\n"
+        "Пришли одним сообщением (можно править списки ниже):\n\n"
+        f"`+: {inc_line}`\n"
+        f"`-: {exc_line}`\n\n"
+        "Пустой `+:` или `-:` очищает список.\n"
+        "Если указать только одну строку — вторая останется как была."
+    )
+
+
+async def _prompt_keywords_manual_edit(
+    max_user_id: int,
+    max_client,
+    *,
+    include: list[str],
+    exclude: list[str],
+    back_callback: str = "ai:block:news_rss:filters",
+) -> None:
+    redis = await get_redis()
+    await claim_text_input(redis, max_user_id, "rss_keywords_edit", "1", REDIS_TTL)
+    builder = InlineKeyboardBuilder()
+    builder.row(("Назад", back_callback))
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=_keywords_edit_prompt(include, exclude),
+        attachments=[builder.build()],
+        fmt="markdown",
+    )
 
 
 async def _show_rss_menu(max_user_id: int, max_client, state: dict) -> None:
@@ -354,15 +410,91 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
         return True
 
     if callback_data == "ai:block:news_rss:filters":
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+        block = normalize_news_rss((state.get("blocks") or {}).get("news_rss"))
+        inc = list(block.get("include_keywords") or [])
+        exc = list(block.get("exclude_keywords") or [])
+        has_keywords = bool(inc or exc)
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "🎯 *Тема / фильтр*\n\n"
+                f"{_format_keywords_lists(inc, exc)}\n\n"
+                "Можно править слова вручную или подобрать заново через ИИ."
+            ),
+            attachments=[
+                InlineKeyboardBuilder.ai_news_rss_filters_menu(has_keywords=has_keywords)
+            ],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data == "ai:block:news_rss:kw:pick_ai":
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
                 "🎯 *Тема фильтра*\n\n"
                 "Выбери нишу — ИИ предложит ключевые слова include/exclude.\n"
-                "Потом можно утвердить или переделать."
+                "Потом можно утвердить, переделать или править вручную."
             ),
             attachments=[InlineKeyboardBuilder.ai_news_rss_niche_select()],
             fmt="markdown",
+        )
+        return True
+
+    if callback_data == "ai:block:news_rss:kw:show":
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+        block = normalize_news_rss((state.get("blocks") or {}).get("news_rss"))
+        niche = block.get("niche") or ""
+        text = format_keywords_review(
+            niche=niche or "custom",
+            include=list(block.get("include_keywords") or []),
+            exclude=list(block.get("exclude_keywords") or []),
+            reason="Текущий сохранённый фильтр.",
+        )
+        builder = InlineKeyboardBuilder()
+        builder.row(("✏️ Править вручную", "ai:block:news_rss:kw:edit_manual"))
+        builder.row(("🤖 Подобрать заново", "ai:block:news_rss:kw:pick_ai"))
+        builder.row(("Назад", "ai:block:news_rss:filters"))
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=text,
+            attachments=[builder.build()],
+            fmt="markdown",
+        )
+        return True
+
+    if callback_data == "ai:block:news_rss:kw:edit_manual":
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+        include: list[str] = []
+        exclude: list[str] = []
+        redis = await get_redis()
+        raw = await redis.get(_kw_review_key(max_user_id))
+        if raw:
+            payload = json.loads(raw)
+            include = list(payload.get("include") or [])
+            exclude = list(payload.get("exclude") or [])
+        else:
+            block = normalize_news_rss((state.get("blocks") or {}).get("news_rss"))
+            include = list(block.get("include_keywords") or [])
+            exclude = list(block.get("exclude_keywords") or [])
+        await _prompt_keywords_manual_edit(
+            max_user_id,
+            max_client,
+            include=include,
+            exclude=exclude,
         )
         return True
 
@@ -572,6 +704,85 @@ async def handle_rss_message(max_user_id: int, message_text: str, redis) -> bool
                     channel_title=(channel.title if channel else "") or "",
                     channel_topic=(channel.topic if channel else "") or "",
                 )
+                return True
+            finally:
+                await max_client.close()
+
+    keywords_wait = await redis.get(f"ai_rss_keywords_edit_wait:{max_user_id}")
+    if keywords_wait:
+        await redis.delete(f"ai_rss_keywords_edit_wait:{max_user_id}")
+        async with async_session_factory() as session:
+            max_client = MaxAPIHTTPClient()
+            try:
+                parsed = parse_keywords_edit_text(message_text, allow_plain_include=True)
+                if parsed is None:
+                    await claim_text_input(
+                        redis, max_user_id, "rss_keywords_edit", "1", REDIS_TTL
+                    )
+                    builder = InlineKeyboardBuilder()
+                    builder.row(("Назад", "ai:block:news_rss:filters"))
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=(
+                            "Не понял формат. Пришли так:\n\n"
+                            "`+: слово1, слово2`\n"
+                            "`-: слово3, слово4`"
+                        ),
+                        attachments=[builder.build()],
+                        fmt="markdown",
+                    )
+                    return True
+
+                new_inc, new_exc = parsed
+                fsm = AIStudioFSM()
+                state = await fsm.get_state(max_user_id)
+                if not state:
+                    await _session_expired(max_user_id, max_client)
+                    return True
+
+                block = normalize_news_rss((state.get("blocks") or {}).get("news_rss"))
+                # Prefer draft from AI review if present, else saved block
+                cur_inc = list(block.get("include_keywords") or [])
+                cur_exc = list(block.get("exclude_keywords") or [])
+                niche = block.get("niche") or "custom"
+                topic_brief = block.get("topic_brief") or ""
+                raw_review = await redis.get(_kw_review_key(max_user_id))
+                if raw_review:
+                    payload = json.loads(raw_review)
+                    cur_inc = list(payload.get("include") or cur_inc)
+                    cur_exc = list(payload.get("exclude") or cur_exc)
+                    niche = payload.get("niche") or niche
+                    topic_brief = payload.get("topic_brief") or topic_brief
+                    await redis.delete(_kw_review_key(max_user_id))
+
+                include = new_inc if new_inc is not None else cur_inc
+                exclude = new_exc if new_exc is not None else cur_exc
+
+                await fsm.set_block_data(
+                    max_user_id,
+                    "news_rss",
+                    {
+                        "enabled": True,
+                        "mode": "on_new",
+                        "niche": niche or "custom",
+                        "topic_brief": topic_brief,
+                        "include_keywords": include,
+                        "exclude_keywords": exclude,
+                        "keywords_source": "manual",
+                    },
+                )
+                await fsm.set_block_data(max_user_id, "schedule", {"enabled": False})
+                state = await fsm.get_state(max_user_id)
+                await sync_active_pipeline(session, state)
+                await max_client.send_message_to_user(
+                    user_id=max_user_id,
+                    text=(
+                        "Фильтр сохранён вручную.\n\n"
+                        f"{_format_keywords_lists(include, exclude)}"
+                    ),
+                    fmt="markdown",
+                )
+                await _show_rss_menu(max_user_id, max_client, state)
                 return True
             finally:
                 await max_client.close()
