@@ -3,7 +3,9 @@ from typing import Any
 from loguru import logger
 
 from app.application.pipeline.topic_queue import (
+    normalize_topic_history,
     normalize_topic_queue,
+    with_preserved_topic_history,
     with_preserved_topic_queue,
 )
 from app.bot.keyboards.builder import InlineKeyboardBuilder
@@ -15,15 +17,35 @@ from app.bot.handlers.ai_studio_entry import _model_name, _session_expired, _sho
 from app.bot.texts.studio_hints import TEST_START_HINT
 
 
+def _patch_queue_and_history(
+    block: dict[str, Any],
+    queue: list[str],
+    history: list[str] | None,
+    *,
+    is_post_gen: bool,
+) -> bool:
+    changed = False
+    if normalize_topic_queue(block.get("topic_queue")) != queue:
+        block["topic_queue"] = queue
+        changed = True
+    if is_post_gen and history is not None:
+        if normalize_topic_history(block.get("topic_history")) != history:
+            block["topic_history"] = history
+            changed = True
+    return changed
+
+
 async def apply_topic_queue_to_fsm(
     max_user_id: int,
     channel_id: int,
     remaining: list[str],
     *,
     block_type: str = "post_gen",
+    history: list[str] | None = None,
 ) -> None:
     """Align Studio FSM (and per-channel cache) with the live topic queue."""
     queue = normalize_topic_queue(remaining)
+    hist = normalize_topic_history(history) if history is not None else None
     target = (block_type or "post_gen").strip() or "post_gen"
     fsm = AIStudioFSM()
     state = await fsm.get_state(max_user_id)
@@ -34,9 +56,18 @@ async def apply_topic_queue_to_fsm(
     if state.get("channel_id") == channel_id and state.get("blocks"):
         blocks = dict(state.get("blocks") or {})
         block = dict(blocks.get(target) or {})
-        if normalize_topic_queue(block.get("topic_queue")) != queue:
-            block["topic_queue"] = queue
+        changed = _patch_queue_and_history(
+            block, queue, hist, is_post_gen=(target == "post_gen")
+        )
+        if changed:
             blocks[target] = block
+        if target != "post_gen" and hist is not None:
+            post = dict(blocks.get("post_gen") or {})
+            if normalize_topic_history(post.get("topic_history")) != hist:
+                post["topic_history"] = hist
+                blocks["post_gen"] = post
+                changed = True
+        if changed:
             updates["blocks"] = blocks
 
     pipes = dict(state.get("pipelines") or {})
@@ -45,10 +76,20 @@ async def apply_topic_queue_to_fsm(
         cached = dict(pipes[ch_key] or {})
         # Cache may be UI dict or (rarely) v2 — only patch UI-shaped entries.
         if cached.get("version") != 2:
+            cache_changed = False
             block_c = dict(cached.get(target) or {})
-            if normalize_topic_queue(block_c.get("topic_queue")) != queue:
-                block_c["topic_queue"] = queue
+            if _patch_queue_and_history(
+                block_c, queue, hist, is_post_gen=(target == "post_gen")
+            ):
                 cached[target] = block_c
+                cache_changed = True
+            if target != "post_gen" and hist is not None:
+                post_c = dict(cached.get("post_gen") or {})
+                if normalize_topic_history(post_c.get("topic_history")) != hist:
+                    post_c["topic_history"] = hist
+                    cached["post_gen"] = post_c
+                    cache_changed = True
+            if cache_changed:
                 pipes[ch_key] = cached
                 updates["pipelines"] = pipes
 
@@ -66,7 +107,8 @@ async def sync_active_pipeline(
 
     By default keeps the live ``topic_queue`` from the DB so schedule/block edits
     cannot restore topics already consumed by a slot. Pass ``sync_topic_queue=True``
-    when the user explicitly edited the queue in Studio.
+    when the user explicitly edited the queue in Studio. ``topic_history`` is
+    always taken from the live run unless that journal is still empty (backfill).
     """
     if not state or not state.get("channel_id"):
         return False
@@ -83,22 +125,34 @@ async def sync_active_pipeline(
         return False
 
     blocks = state.get("blocks") or {}
-    if not sync_topic_queue and active.blocks_config:
-        blocks = with_preserved_topic_queue(blocks, active.blocks_config)
-        owner_id = state.get("user_id")
-        if owner_id is not None:
-            try:
-                from app.application.pipeline.topic_queue import topic_queue_from_blocks_config
+    if active.blocks_config:
+        if sync_topic_queue:
+            blocks = with_preserved_topic_history(blocks, active.blocks_config)
+        else:
+            blocks = with_preserved_topic_queue(blocks, active.blocks_config)
+            owner_id = state.get("user_id")
+            if owner_id is not None:
+                try:
+                    from app.application.pipeline.topic_queue import (
+                        get_topic_history_from_post_cfg,
+                        topic_history_from_blocks_config,
+                        topic_queue_from_blocks_config,
+                    )
 
-                await apply_topic_queue_to_fsm(
-                    int(owner_id),
-                    int(state["channel_id"]),
-                    topic_queue_from_blocks_config(active.blocks_config),
-                )
-            except Exception as e:
-                logger.warning(
-                    f"FSM topic_queue refresh failed channel_id={state['channel_id']}: {e}"
-                )
+                    live_hist = topic_history_from_blocks_config(
+                        active.blocks_config
+                    )
+                    await apply_topic_queue_to_fsm(
+                        int(owner_id),
+                        int(state["channel_id"]),
+                        topic_queue_from_blocks_config(active.blocks_config),
+                        history=live_hist
+                        or get_topic_history_from_post_cfg(blocks.get("post_gen")),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"FSM topic_queue refresh failed channel_id={state['channel_id']}: {e}"
+                    )
 
     await mgr.update_active_config(
         state["channel_id"],
@@ -153,6 +207,7 @@ async def handle_pipeline_callback(
             return True
 
         from app.application.billing.quota import QuotaDenied
+        from app.application.channels.sync_channel_meta import sync_channel_meta
         from app.application.pipeline.manage_pipeline import PipelineManager
         from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
         from app.infrastructure.repositories.rss_seen_repository import SQLARssSeenRepository
@@ -184,6 +239,11 @@ async def handle_pipeline_callback(
             return True
 
         repo = SQLAPipelineRunRepository(session)
+        if channel:
+            channel = await sync_channel_meta(
+                channel, max_client, channel_repo, pipe_repo=repo
+            )
+
         rss_repo = SQLARssSeenRepository(session)
         subscription_repo = SQLAlchemySubscriptionRepository(session)
         mgr = PipelineManager(repo, rss_repo, subscription_repo)
@@ -192,7 +252,7 @@ async def handle_pipeline_callback(
                 user_id=user_id,
                 max_user_id=max_user_id,
                 channel_id=state["channel_id"],
-                channel_link=channel.channel_link if channel else "",
+                channel_link=(channel.channel_link if channel else "") or "",
                 blocks_config=state["blocks"],
                 frequency=sched_block.get("frequency") or "daily",
                 times=list(sched_block.get("times") or []),
@@ -251,6 +311,18 @@ async def handle_pipeline_callback(
             return True
 
         channel = await channel_repo.get_by_id(state["channel_id"]) if state.get("channel_id") else None
+        if channel:
+            from app.application.channels.sync_channel_meta import sync_channel_meta
+            from app.infrastructure.repositories.pipeline_run_repository import (
+                SQLAPipelineRunRepository,
+            )
+
+            channel = await sync_channel_meta(
+                channel,
+                max_client,
+                channel_repo,
+                pipe_repo=SQLAPipelineRunRepository(session),
+            )
         ch_title = channel.title if channel else ""
         blocks = state.get("blocks", {})
 

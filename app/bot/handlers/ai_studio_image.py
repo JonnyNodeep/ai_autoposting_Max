@@ -359,7 +359,10 @@ async def handle_image_callback(callback_data: str, max_user_id: int, max_client
         )
 
         openai_client = OpenAIService()
-        generated_prompt = await _generate_image_prompt(openai_client, review["description"])
+        from app.application.admin.billing_context import billing_user_for_max_id
+
+        async with billing_user_for_max_id(session, max_user_id):
+            generated_prompt = await _generate_image_prompt(openai_client, review["description"])
 
         review["prompt"] = generated_prompt
         await redis.setex(f"ai_image_prompt_review:{max_user_id}", REVIEW_TTL, json.dumps(review, ensure_ascii=False))
@@ -465,7 +468,10 @@ async def handle_image_message(max_user_id: int, message_text: str, redis) -> bo
                 text="🖌 Генерирую промпт для изображения...",
             )
 
-            generated_prompt = await _generate_image_prompt(openai_client, message_text)
+            from app.application.admin.billing_context import billing_user_for_max_id
+
+            async with billing_user_for_max_id(session, max_user_id):
+                generated_prompt = await _generate_image_prompt(openai_client, message_text)
 
             review_data = json.dumps({
                 "description": message_text,

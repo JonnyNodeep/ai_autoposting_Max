@@ -197,7 +197,10 @@ async def handle_video_callback(callback_data: str, max_user_id: int, max_client
         )
 
         openai_client = OpenAIService()
-        generated_prompt = await _generate_video_prompt(openai_client, review["description"])
+        from app.application.admin.billing_context import billing_user_for_max_id
+
+        async with billing_user_for_max_id(session, max_user_id):
+            generated_prompt = await _generate_video_prompt(openai_client, review["description"])
 
         review["prompt"] = generated_prompt
         await redis.setex(f"ai_video_prompt_review:{max_user_id}", REVIEW_TTL, json.dumps(review, ensure_ascii=False))
@@ -306,7 +309,10 @@ async def handle_video_message(max_user_id: int, message_text: str, redis) -> bo
                 text="🎬 Генерирую видеопромпт...",
             )
 
-            generated_prompt = await _generate_video_prompt(openai_client, message_text)
+            from app.application.admin.billing_context import billing_user_for_max_id
+
+            async with billing_user_for_max_id(session, max_user_id):
+                generated_prompt = await _generate_video_prompt(openai_client, message_text)
 
             review_data = json.dumps({
                 "description": message_text,

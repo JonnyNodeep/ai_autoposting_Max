@@ -4,6 +4,22 @@
 <h2>{{ user.full_name }} <span class="muted">#{{ user.id }}</span></h2>
 <p class="muted">max_user_id={{ user.max_user_id }} · @{{ user.username or "—" }} · активен={{ user.is_active }}</p>
 
+<div class="card">
+  <h3>Расход OpenAI (оценка)</h3>
+  <form method="get" class="row">
+    <label>С
+      <input type="date" name="date_from" value="{{ date_from }}" />
+    </label>
+    <label>По
+      <input type="date" name="date_to" value="{{ date_to }}" />
+    </label>
+    <button type="submit">Показать</button>
+    <a class="muted" href="/admin/users/{{ user.id }}?date_from=&amp;date_to=">Всё время</a>
+  </form>
+  <p style="margin-top:1rem;font-size:1.25rem"><strong>${{ "%.2f"|format(api_cost) }}</strong>
+    <span class="muted">за период</span></p>
+</div>
+
 <div class="grid">
   <div class="card">
     <h3>Подписка</h3>
@@ -29,7 +45,14 @@
         </label>
         <label>Публикаций/день
           <select name="posts_per_day">
-            {% for n in [1, 2, 3, 5] %}
+            {% set ppd_options = [1, 2, 3, 5] %}
+            {% if high_freq_allowed %}
+            {% set ppd_options = ppd_options + [6, 7, 8] %}
+            {% endif %}
+            {% if sub.posts_per_day not in ppd_options %}
+            {% set ppd_options = ppd_options + [sub.posts_per_day] %}
+            {% endif %}
+            {% for n in ppd_options|sort %}
             <option value="{{ n }}" {% if sub.posts_per_day == n %}selected{% endif %}>{{ n }}</option>
             {% endfor %}
           </select>
@@ -70,12 +93,40 @@
 <div class="card">
   <h3>Каналы ({{ channels|length }})</h3>
   <table>
-    <thead><tr><th>ID</th><th>Название</th><th>Активен</th></tr></thead>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Название</th>
+        <th>Активен</th>
+        <th>Ссылка MAX</th>
+        <th></th>
+      </tr>
+    </thead>
     <tbody>
       {% for ch in channels %}
-      <tr><td>{{ ch.id }}</td><td>{{ ch.title }}</td><td>{{ ch.is_active }}</td></tr>
+      <tr>
+        <td>{{ ch.id }}</td>
+        <td>{{ ch.title }}</td>
+        <td>{{ ch.is_active }}</td>
+        <td style="max-width:16rem;word-break:break-all">
+          {% if ch.channel_link %}
+            <a href="{{ ch.channel_link }}" target="_blank" rel="noopener">{{ ch.channel_link }}</a>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="/admin/users/{{ user.id }}/channels/{{ ch.id }}/refresh-link" style="display:inline">
+            <button type="submit">Обновить из MAX</button>
+          </form>
+          <form method="post" action="/admin/users/{{ user.id }}/channels/{{ ch.id }}/set-link" class="row" style="margin-top:0.5rem">
+            <input type="url" name="channel_link" placeholder="https://max.ru/..." value="{{ ch.channel_link or '' }}" style="min-width:12rem" />
+            <button type="submit">Сохранить</button>
+          </form>
+        </td>
+      </tr>
       {% else %}
-      <tr><td colspan="3" class="muted">Нет</td></tr>
+      <tr><td colspan="5" class="muted">Нет</td></tr>
       {% endfor %}
     </tbody>
   </table>

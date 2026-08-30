@@ -11,6 +11,7 @@ RUN poetry config virtualenvs.create false \
 FROM python:3.12-slim
 
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

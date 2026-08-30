@@ -3,7 +3,13 @@ from abc import ABC, abstractmethod
 
 class OpenAIClient(ABC):
     @abstractmethod
-    async def generate_text(self, prompt: str, system_prompt: str | None = None) -> str: ...
+    async def generate_text(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        model: str | None = None,
+    ) -> str: ...
 
     @abstractmethod
     async def generate_image(self, prompt: str) -> str: ...

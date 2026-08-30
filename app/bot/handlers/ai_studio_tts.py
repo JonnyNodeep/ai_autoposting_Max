@@ -8,12 +8,14 @@ from app.application.pipeline.tts_instructions import (
 from app.application.pipeline.tts_voices import (
     DEFAULT_OPENAI_SPEED,
     DEFAULT_OPENAI_VOICE,
+    DEFAULT_SPEECHKIT_PITCH_SHIFT,
     DEFAULT_SPEECHKIT_ROLE,
     DEFAULT_SPEECHKIT_SPEED,
     DEFAULT_SPEECHKIT_VOICE,
     DEFAULT_TTS_PROVIDER,
     TTS_PROVIDER_OPENAI,
     TTS_PROVIDER_SPEECHKIT,
+    TTS_PROVIDER_SUNOR,
     TTS_PROVIDERS,
     voice_label,
 )
@@ -52,13 +54,66 @@ async def _ask_audio_brief(max_user_id: int, max_client) -> None:
     await max_client.send_message_to_user(
         user_id=max_user_id,
         text=(
-            "🎙 *Аудио — бриф*\n\n"
-            "Опиши правила контента (возраст, тон, табу).\n"
-            "На каждом запуске будет новый выпуск.\n\n"
-            "Пример: «добрые bedtime-сказки для 3–6 лет, без страшного, "
-            "мягкий финал про сон»"
+            "🎙 *Видео-сказка — бриф*\n\n"
+            "Опиши правила контента (тон, табу). Возраст зафиксирован: *3–6 лет*, "
+            "озвучка Sunor (Suno V5.5), в канал уйдёт одно видео.\n\n"
+            "Пример: «добрые bedtime-сказки, без страшного, мягкий финал про сон»"
         ),
         attachments=[builder.build()],
+        fmt="markdown",
+    )
+
+
+async def _ask_custom_pitch(max_user_id: int, max_client) -> None:
+    redis = await get_redis()
+    await claim_text_input(redis, max_user_id, "tts_pitch", "1", REDIS_TTL)
+    builder = InlineKeyboardBuilder()
+    builder.row(("Назад к блокам", "ai:back_to_blocks"))
+    builder.row(("На главную", "main_menu"))
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=(
+            "🎙 *Тембр — своё число*\n\n"
+            "Пришли смещение в *Гц* (от *-1000* до *1000*).\n"
+            "Примеры: `0`, `75`, `-120`"
+        ),
+        attachments=[builder.build()],
+        fmt="markdown",
+    )
+
+
+def _parse_pitch_shift(raw: str) -> float | None:
+    text = (raw or "").strip().lower().replace(",", ".")
+    for suffix in ("гц", "hz"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
+    try:
+        return max(-1000.0, min(1000.0, float(text)))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _continue_after_pitch(
+    max_user_id: int,
+    max_client,
+    *,
+    pitch: float,
+    fsm: AIStudioFSM,
+) -> None:
+    state = await fsm.get_state(max_user_id)
+    tts = (state or {}).get("blocks", {}).get("tts_gen", {})
+    voice = str(tts.get("voice") or DEFAULT_SPEECHKIT_VOICE)
+    role = str(tts.get("role") or DEFAULT_SPEECHKIT_ROLE)
+    pitch_label = f"{pitch:+g}" if pitch != 0 else "0"
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=(
+            f"🎙 Тембр: *{pitch_label}* Гц\n\n"
+            "Выбери *амплуа* голоса:"
+        ),
+        attachments=[
+            InlineKeyboardBuilder.ai_tts_role_select(role, voice=voice)
+        ],
         fmt="markdown",
     )
 
@@ -83,14 +138,20 @@ async def _ask_custom_instructions(max_user_id: int, max_client) -> None:
 
 
 def _provider_defaults(provider: str) -> dict:
-    if provider == TTS_PROVIDER_SPEECHKIT:
+    if provider == TTS_PROVIDER_SUNOR:
         return {
-            "provider": TTS_PROVIDER_SPEECHKIT,
-            "voice": DEFAULT_SPEECHKIT_VOICE,
-            "speed": DEFAULT_SPEECHKIT_SPEED,
-            "role": DEFAULT_SPEECHKIT_ROLE,
+            "provider": TTS_PROVIDER_SUNOR,
+            "model": "suno",
+            "voice": "sunor",
+            "speed": 1.0,
+            "role": "",
             "response_format": "mp3",
+            "instructions": "",
+            "instructions_preset": "custom",
         }
+    if provider == TTS_PROVIDER_SPEECHKIT:
+        # SpeechKit disabled — map to Sunor.
+        return _provider_defaults(TTS_PROVIDER_SUNOR)
     return {
         "provider": TTS_PROVIDER_OPENAI,
         "voice": DEFAULT_OPENAI_VOICE,
@@ -127,52 +188,26 @@ async def handle_tts_callback(
 
     if callback_data.startswith("ai:edit:tts_gen"):
         state = await _ensure_audio_blocks(fsm, max_user_id)
-        tts = (state.get("blocks") or {}).get("tts_gen", {})
-        provider = str(tts.get("provider") or DEFAULT_TTS_PROVIDER)
-        if provider not in TTS_PROVIDERS:
-            provider = DEFAULT_TTS_PROVIDER
-        patch = {
-            "provider": provider,
-            "model": tts.get("model") or "gpt-4o-mini-tts",
-            "voice": tts.get("voice")
-            or (
-                DEFAULT_SPEECHKIT_VOICE
-                if provider == TTS_PROVIDER_SPEECHKIT
-                else DEFAULT_OPENAI_VOICE
-            ),
-            "speed": float(
-                tts.get(
-                    "speed",
-                    DEFAULT_SPEECHKIT_SPEED
-                    if provider == TTS_PROVIDER_SPEECHKIT
-                    else DEFAULT_OPENAI_SPEED,
-                )
-            ),
-            "role": tts.get("role") or DEFAULT_SPEECHKIT_ROLE,
-            "response_format": "mp3",
-            "instructions": tts.get("instructions") or DEFAULT_TTS_INSTRUCTIONS,
-            "instructions_preset": (
-                tts.get("instructions_preset") or DEFAULT_TTS_INSTRUCTIONS_PRESET
-            ),
-        }
-        await fsm.set_block_data(max_user_id, "tts_gen", patch)
+        await fsm.set_block_data(
+            max_user_id, "tts_gen", _provider_defaults(TTS_PROVIDER_SUNOR)
+        )
         await fsm.set_block_data(
             max_user_id,
             "story_gen",
             {
                 "mode": "ai",
-                "format": (state.get("blocks") or {})
-                .get("story_gen", {})
-                .get("format")
-                or "fairy_tale",
+                "format": "fairy_tale",
+                "age_range": "3-6",
             },
         )
         await fsm.set_data(max_user_id, {"step": AIStudioStep.EDIT_BLOCK})
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                "🎙 *Аудио*\n\n"
-                "Выбери тип выпуска. Настройки длины, голоса и стиля — дальше."
+                "🎙 *Видео-сказка*\n\n"
+                "Озвучка Sunor (Suno V5.5), сценарий для детей *3–6 лет* "
+                "(на ночь). В канал уйдёт одно видео.\n\n"
+                "Выбери тип выпуска:"
             ),
             attachments=[InlineKeyboardBuilder.ai_audio_type_select()],
             fmt="markdown",
@@ -196,14 +231,25 @@ async def handle_tts_callback(
         await fsm.set_block_data(
             max_user_id,
             "story_gen",
-            {"format": "fairy_tale", "mode": "ai", "enabled": True},
+            {
+                "format": "fairy_tale",
+                "mode": "ai",
+                "enabled": True,
+                "age_range": "3-6",
+            },
+        )
+        await fsm.set_block_data(
+            max_user_id, "tts_gen", _provider_defaults(TTS_PROVIDER_SUNOR)
         )
         state = await fsm.get_state(max_user_id)
         if not (state.get("blocks") or {}).get("story_gen", {}).get("enabled"):
             await fsm.toggle_block(max_user_id, "story_gen")
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text="🎙 *Аудио — сказка*\n\nВыбери длительность озвучки:",
+            text=(
+                "🎙 *Видео-сказка*\n\n"
+                "Ориентир длительности (текст строго до 4500 символов):"
+            ),
             attachments=[InlineKeyboardBuilder.ai_story_gen_minutes_select()],
             fmt="markdown",
         )
@@ -214,35 +260,45 @@ async def handle_tts_callback(
         await fsm.set_block_data(
             max_user_id,
             "story_gen",
-            {"target_minutes": minutes, "mode": "ai", "format": "fairy_tale"},
+            {
+                "target_minutes": minutes,
+                "mode": "ai",
+                "format": "fairy_tale",
+                "age_range": "3-6",
+            },
         )
-        state = await fsm.get_state(max_user_id)
-        tts = (state or {}).get("blocks", {}).get("tts_gen", {})
-        provider = str(tts.get("provider") or DEFAULT_TTS_PROVIDER)
-        if provider not in TTS_PROVIDERS:
-            provider = DEFAULT_TTS_PROVIDER
+        await fsm.set_block_data(
+            max_user_id, "tts_gen", _provider_defaults(TTS_PROVIDER_SUNOR)
+        )
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text=f"🎙 Длительность: *{minutes} мин*\n\nВыбери сервис озвучки:",
-            attachments=[InlineKeyboardBuilder.ai_tts_provider_select(provider)],
+            text=(
+                f"🎙 Ориентир: *{minutes} мин* · Sunor V5.5 · 3–6 лет\n\n"
+                "Дальше — бриф канала."
+            ),
             fmt="markdown",
         )
+        await _ask_audio_brief(max_user_id, max_client)
         return True
 
     if callback_data.startswith("ai:block:tts_gen:provider:"):
         provider = callback_data.split(":")[4]
-        if provider not in TTS_PROVIDERS:
-            provider = DEFAULT_TTS_PROVIDER
+        if provider == TTS_PROVIDER_SPEECHKIT or provider not in TTS_PROVIDERS:
+            provider = TTS_PROVIDER_SUNOR
         await fsm.set_block_data(max_user_id, "tts_gen", _provider_defaults(provider))
+        if provider == TTS_PROVIDER_SUNOR:
+            await _ask_audio_brief(max_user_id, max_client)
+            return True
         state = await fsm.get_state(max_user_id)
         tts = (state or {}).get("blocks", {}).get("tts_gen", {})
-        voice = str(tts.get("voice") or DEFAULT_SPEECHKIT_VOICE)
-        label = "SpeechKit" if provider == TTS_PROVIDER_SPEECHKIT else "OpenAI"
+        voice = str(tts.get("voice") or DEFAULT_OPENAI_VOICE)
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text=f"🎙 Сервис: *{label}*\n\nВыбери голос:",
+            text="🎙 Сервис: *OpenAI*\n\nВыбери голос:",
             attachments=[
-                InlineKeyboardBuilder.ai_tts_voice_select(voice, provider=provider)
+                InlineKeyboardBuilder.ai_tts_voice_select(
+                    voice, provider=TTS_PROVIDER_OPENAI
+                )
             ],
             fmt="markdown",
         )
@@ -293,17 +349,14 @@ async def handle_tts_callback(
         tts = (state.get("blocks") or {}).get("tts_gen", {})
 
         if provider == TTS_PROVIDER_SPEECHKIT:
-            voice = str(tts.get("voice") or DEFAULT_SPEECHKIT_VOICE)
-            role = str(tts.get("role") or DEFAULT_SPEECHKIT_ROLE)
+            pitch = float(tts.get("pitchShift", DEFAULT_SPEECHKIT_PITCH_SHIFT))
             await max_client.send_message_to_user(
                 user_id=max_user_id,
                 text=(
                     f"🎙 Скорость: *{speed}*\n\n"
-                    "Выбери *амплуа* голоса:"
+                    "Выбери *тембр* (pitchShift, Гц):"
                 ),
-                attachments=[
-                    InlineKeyboardBuilder.ai_tts_role_select(role, voice=voice)
-                ],
+                attachments=[InlineKeyboardBuilder.ai_tts_pitch_select(pitch)],
                 fmt="markdown",
             )
             return True
@@ -319,6 +372,31 @@ async def handle_tts_callback(
             ),
             attachments=[InlineKeyboardBuilder.ai_tts_instructions_select(preset)],
             fmt="markdown",
+        )
+        return True
+
+    if callback_data.startswith("ai:block:tts_gen:pitch:"):
+        pitch_raw = callback_data.split(":")[4]
+        if pitch_raw == "custom":
+            await _ask_custom_pitch(max_user_id, max_client)
+            return True
+
+        pitch = float(pitch_raw)
+        await fsm.set_block_data(
+            max_user_id,
+            "tts_gen",
+            {
+                "provider": TTS_PROVIDER_SPEECHKIT,
+                "pitchShift": pitch,
+                "response_format": "mp3",
+                "enabled": True,
+            },
+        )
+        state = await fsm.get_state(max_user_id)
+        if not (state.get("blocks") or {}).get("tts_gen", {}).get("enabled"):
+            await fsm.toggle_block(max_user_id, "tts_gen")
+        await _continue_after_pitch(
+            max_user_id, max_client, pitch=pitch, fsm=fsm
         )
         return True
 
@@ -424,6 +502,61 @@ async def handle_tts_instructions_message(
                 await fsm.toggle_block(max_user_id, "tts_gen")
             await sync_active_pipeline(session, state)
             await _ask_audio_brief(max_user_id, max_client)
+            return True
+        finally:
+            await max_client.close()
+
+
+async def handle_tts_pitch_message(
+    max_user_id: int, message_text: str, redis
+) -> bool:
+    wait_key = f"ai_tts_pitch_wait:{max_user_id}"
+    if not await redis.get(wait_key):
+        return False
+
+    from app.infrastructure.database.session import async_session_factory
+    from app.infrastructure.services.max_client import MaxAPIHTTPClient
+
+    async with async_session_factory() as session:
+        max_client = MaxAPIHTTPClient()
+        try:
+            pitch = _parse_pitch_shift(message_text)
+            if pitch is None:
+                await max_client.send_message_to_user(
+                    user_id=max_user_id,
+                    text=(
+                        "Не понял число. Пришли смещение в Гц "
+                        "от *-1000* до *1000* (например `75` или `-120`)."
+                    ),
+                    fmt="markdown",
+                )
+                return True
+
+            await redis.delete(wait_key)
+            fsm = AIStudioFSM()
+            state = await fsm.get_state(max_user_id)
+            if not state:
+                await _session_expired(max_user_id, max_client)
+                return True
+
+            await fsm.set_block_data(
+                max_user_id,
+                "tts_gen",
+                {
+                    "provider": TTS_PROVIDER_SPEECHKIT,
+                    "pitchShift": pitch,
+                    "response_format": "mp3",
+                    "enabled": True,
+                },
+            )
+            state = await fsm.get_state(max_user_id)
+            if not (state.get("blocks") or {}).get("tts_gen", {}).get("enabled"):
+                await fsm.toggle_block(max_user_id, "tts_gen")
+                state = await fsm.get_state(max_user_id)
+            await sync_active_pipeline(session, state)
+            await _continue_after_pitch(
+                max_user_id, max_client, pitch=pitch, fsm=fsm
+            )
             return True
         finally:
             await max_client.close()

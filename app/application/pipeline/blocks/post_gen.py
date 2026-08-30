@@ -266,6 +266,8 @@ async def _send_max(
         attachments=attachments if attachments else None,
         fmt="markdown",
     )
+    if isinstance(ctx.meta, dict):
+        ctx.meta["published"] = True
 
 
 def _cleanup_temps(paths: list[str]) -> None:
@@ -274,6 +276,78 @@ def _cleanup_temps(paths: list[str]) -> None:
             Path(p).unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _has_publishable_video(ctx: PipelineContext) -> bool:
+    return bool(
+        (ctx.video_token or "").strip() or (ctx.video_local_path or "").strip()
+    )
+
+
+async def _maybe_apply_tale_post_brief(
+    ctx: PipelineContext,
+    config: dict[str, Any],
+) -> None:
+    """Regenerate post caption from post_gen brief for fairy-tale video publishes."""
+    if not _has_publishable_video(ctx):
+        return
+    if str(config.get("mode") or "ai").strip().lower() != "ai":
+        return
+
+    from app.application.pipeline.generate_post import generate_tale_post_caption
+    from app.application.pipeline.normalize import resolve_post_brief
+    from app.application.pipeline.tale_video import TaleScript
+
+    schedule = ctx.meta.get("pipeline_schedule") if isinstance(ctx.meta, dict) else None
+    slot_time = str(ctx.meta.get("slot_time") or "").strip() if isinstance(ctx.meta, dict) else ""
+    brief = resolve_post_brief(schedule, config, slot_time or None).strip()
+    if not brief:
+        return
+    if ctx.openai_client is None:
+        logger.warning(
+            f"post_gen tale brief skipped: no openai_client run_id={ctx.run_id}"
+        )
+        return
+
+    script = TaleScript.from_meta(
+        ctx.meta.get("tale_script") if isinstance(ctx.meta, dict) else None
+    )
+    tale_title = ""
+    tale_caption = (ctx.post_text or "").strip()
+    story_excerpt = (ctx.story_script or "").strip()
+    if script is not None:
+        tale_title = script.title
+        tale_caption = tale_caption or script.caption
+        story_excerpt = story_excerpt or script.story
+
+    if isinstance(ctx.meta, dict):
+        tale_title = tale_title or str(ctx.meta.get("tale_title") or "").strip()
+
+    try:
+        caption = await generate_tale_post_caption(
+            ctx.openai_client,
+            brief,
+            ctx.channel_title or "",
+            tale_title=tale_title,
+            tale_caption=tale_caption,
+            story_excerpt=story_excerpt,
+            bold_headings=bool(config.get("bold_headings", True)),
+            use_emoji=bool(config.get("use_emoji", True)),
+            comments_enabled=bool(config.get("comments_enabled", False)),
+        )
+    except Exception:
+        logger.exception(
+            f"post_gen tale brief generation failed run_id={ctx.run_id}; "
+            f"keeping story caption"
+        )
+        return
+
+    if caption.strip():
+        ctx.post_text = caption.strip()
+        logger.info(
+            f"post_gen tale: caption from brief len={len(ctx.post_text)} "
+            f"run_id={ctx.run_id}"
+        )
 
 
 class PostGenBlock:
@@ -307,11 +381,17 @@ class PostGenBlock:
                     )
             return
 
+        await _maybe_apply_tale_post_brief(ctx, config)
+
+        has_video = bool(
+            (ctx.video_token or "").strip() or (ctx.video_local_path or "").strip()
+        )
+        has_audio = bool(ctx.audio_token or (ctx.audio_local_path or "").strip())
+        has_image = bool((ctx.image_url or "").strip())
+
         post_text = (ctx.post_text or "").strip() or (config.get("generated_post") or "").strip()
         if not post_text:
-            if ctx.target == "user" and (
-                ctx.video_token or (ctx.video_local_path or "").strip()
-            ) and ctx.target_user_id is not None:
+            if ctx.target == "user" and has_video and ctx.target_user_id is not None:
                 token = await _video_token_for_delivery(ctx, temp_files=temp_files)
                 if token:
                     await ctx.max_client.send_message_to_user(
@@ -320,13 +400,8 @@ class PostGenBlock:
                         attachments=[{"type": "video", "payload": {"token": token}}],
                         fmt="markdown",
                     )
-            return
-
-        has_video = bool(
-            (ctx.video_token or "").strip() or (ctx.video_local_path or "").strip()
-        )
-        has_audio = bool(ctx.audio_token or (ctx.audio_local_path or "").strip())
-        has_image = bool((ctx.image_url or "").strip())
+            elif not (ctx.target == "channel" and has_video):
+                return
 
         if has_audio:
             post_text = build_share_cta_audio(post_text)

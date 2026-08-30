@@ -60,6 +60,16 @@ async def test_claim_text_input_clears_schedule_slot_prompt_wait():
 
 
 @pytest.mark.asyncio
+async def test_claim_text_input_clears_schedule_slot_image_wait():
+    redis = FakeRedis()
+    uid = 8
+    redis.data[f"ai_schedule_slot_image_wait:{uid}"] = "1"
+    await claim_text_input(redis, uid, "post_gen", "ai", ttl=300)
+    assert f"ai_schedule_slot_image_wait:{uid}" not in redis.data
+    assert redis.data.get(f"ai_post_gen_wait:{uid}") == "ai"
+
+
+@pytest.mark.asyncio
 async def test_claim_style_prompt_clears_studio_and_is_sole_owner():
     redis = FakeRedis()
     uid = 42

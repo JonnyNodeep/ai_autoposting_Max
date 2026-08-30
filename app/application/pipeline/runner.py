@@ -4,7 +4,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.application.auth.feature_access import audio_allowed, video_allowed
+from app.application.auth.feature_access import audio_allowed, drive_allowed, video_allowed
 from app.application.pipeline.blocks.registry import BlockRegistry, default_registry
 from app.application.pipeline.context import PipelineContext
 from app.application.pipeline.generate_post import TopicDedupExhausted, generate_post_text
@@ -43,12 +43,34 @@ def _owner_max_user_id(ctx: PipelineContext) -> int | None:
         return None
 
 
+def _channel_owner_db_id(ctx: PipelineContext) -> int | None:
+    channel = ctx.channel
+    if channel is None:
+        return None
+    raw = getattr(channel, "owner_id", None)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 class PipelineRunner:
     def __init__(self, registry: BlockRegistry | None = None) -> None:
         self._registry = registry or default_registry
 
     async def run(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
+        from app.application.admin.billing_context import billing_user, get_billing_user_id
+
+        # Prefer outer binding (e.g. handler already set billing); else channel owner.
+        owner_db_id = get_billing_user_id() or _channel_owner_db_id(ctx)
+        with billing_user(owner_db_id):
+            return await self._run_impl(ctx, blocks_config)
+
+    async def _run_impl(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
         v2 = normalize_blocks_config(blocks_config)
+        ctx.meta["pipeline_schedule"] = v2.get("schedule") or {}
 
         # Publish-time logo watermark flag lives on image_gen config.
         add_watermark = False
@@ -84,19 +106,52 @@ class PipelineRunner:
                     f"run_id={ctx.run_id}"
                 )
                 await self._alert_topic_dedup(ctx, e)
+                if isinstance(ctx.meta, dict):
+                    ctx.meta["publish_skipped"] = "topic_dedup"
                 return ctx
 
         owner_id = _owner_max_user_id(ctx)
 
+        story_cfg: dict[str, Any] = {}
+        tts_cfg: dict[str, Any] = {}
+        for step in v2["steps"]:
+            if step.get("type") == "story_gen" and step.get("enabled"):
+                story_cfg = dict(step.get("config") or {})
+            if step.get("type") == "tts_gen" and step.get("enabled"):
+                tts_cfg = dict(step.get("config") or {})
+
+        sunor_tale_video = False
+        if story_enabled and tts_cfg:
+            from app.application.pipeline.tts_voices import TTS_PROVIDER_SUNOR
+
+            fmt = str(story_cfg.get("format") or "fairy_tale").strip() or "fairy_tale"
+            provider = str(tts_cfg.get("provider") or "").strip().lower()
+            sunor_tale_video = fmt in ("fairy_tale", "bedtime") and provider == TTS_PROVIDER_SUNOR
+
         for step in v2["steps"]:
             block_type = step["type"]
+            if sunor_tale_video and block_type in (
+                "image_prompt",
+                "image_gen",
+                "video_gen",
+            ):
+                logger.debug(
+                    f"Skipping {block_type} — sunor tale video path run_id={ctx.run_id}"
+                )
+                continue
             if block_type == "video_gen" and not video_allowed(owner_id):
                 logger.debug(
                     f"Skipping video_gen — not whitelisted owner={owner_id} "
                     f"run_id={ctx.run_id}"
                 )
                 continue
-            if block_type in ("tts_gen", "story_gen") and not audio_allowed(owner_id):
+            if block_type == "drive_video" and not drive_allowed(owner_id):
+                logger.debug(
+                    f"Skipping drive_video — not whitelisted owner={owner_id} "
+                    f"run_id={ctx.run_id}"
+                )
+                continue
+            if block_type in ("tts_gen", "story_gen", "sunor_gen") and not audio_allowed(owner_id):
                 logger.debug(
                     f"Skipping {block_type} — not whitelisted owner={owner_id} "
                     f"run_id={ctx.run_id}"
@@ -235,6 +290,7 @@ class PipelineRunner:
                         if queued_topic:
                             ctx.meta["topic_queue_popped"] = True
                             ctx.meta["topic_queue_remaining"] = remaining
+                            ctx.meta["topic_queue_used"] = queued_topic
                             ctx.meta["topic_queue_block"] = "post_gen"
                             exhausted = len(remaining) == 0
                             ctx.meta["topic_queue_exhausted"] = exhausted

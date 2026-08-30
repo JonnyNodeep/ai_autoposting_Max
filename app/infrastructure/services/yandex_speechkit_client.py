@@ -12,6 +12,7 @@ from loguru import logger
 
 from app.application.pipeline.tts_chunking import chunk_tts_text, concat_audio_to_mp3
 from app.application.pipeline.tts_voices import (
+    DEFAULT_SPEECHKIT_PITCH_SHIFT,
     DEFAULT_SPEECHKIT_ROLE,
     DEFAULT_SPEECHKIT_SPEED,
     DEFAULT_SPEECHKIT_VOICE,
@@ -42,6 +43,7 @@ class YandexSpeechKitService:
         *,
         voice: str = DEFAULT_SPEECHKIT_VOICE,
         speed: float = DEFAULT_SPEECHKIT_SPEED,
+        pitch_shift: float = DEFAULT_SPEECHKIT_PITCH_SHIFT,
         role: str | None = DEFAULT_SPEECHKIT_ROLE,
     ) -> str:
         script = (text or "").strip()
@@ -55,6 +57,10 @@ class YandexSpeechKitService:
             speed_val = max(0.1, min(3.0, float(speed)))
         except (TypeError, ValueError):
             speed_val = DEFAULT_SPEECHKIT_SPEED
+        try:
+            pitch_val = max(-1000.0, min(1000.0, float(pitch_shift)))
+        except (TypeError, ValueError):
+            pitch_val = DEFAULT_SPEECHKIT_PITCH_SHIFT
         role_id = resolve_role(voice_id, role)
 
         chunks = chunk_tts_text(script, max_chars=SPEECHKIT_MAX_CHARS)
@@ -74,6 +80,7 @@ class YandexSpeechKitService:
                         chunk,
                         voice=voice_id,
                         speed=speed_val,
+                        pitch_shift=pitch_val,
                         role=role_id,
                     )
                     part_path = UPLOAD_DIR / f"ysk_part_{uuid.uuid4().hex[:12]}_{i}.mp3"
@@ -84,7 +91,8 @@ class YandexSpeechKitService:
             concat_audio_to_mp3(part_paths, out_path)
             logger.info(
                 f"SpeechKit TTS done voice={voice_id} speed={speed_val} "
-                f"role={role_id} chunks={len(chunks)} path={out_path}"
+                f"pitchShift={pitch_val} role={role_id} chunks={len(chunks)} "
+                f"path={out_path}"
             )
             return str(out_path)
         finally:
@@ -101,6 +109,7 @@ class YandexSpeechKitService:
         *,
         voice: str,
         speed: float,
+        pitch_shift: float,
         role: str | None,
         attempts: int = 3,
     ) -> bytes:
@@ -110,7 +119,12 @@ class YandexSpeechKitService:
         for attempt in range(1, attempts + 1):
             try:
                 return await self._synthesize_chunk(
-                    client, text, voice=voice, speed=speed, role=role
+                    client,
+                    text,
+                    voice=voice,
+                    speed=speed,
+                    pitch_shift=pitch_shift,
+                    role=role,
                 )
             except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ProxyError) as exc:
                 last_exc = exc
@@ -129,9 +143,14 @@ class YandexSpeechKitService:
         *,
         voice: str,
         speed: float,
+        pitch_shift: float,
         role: str | None,
     ) -> bytes:
-        hints: list[dict] = [{"voice": voice}, {"speed": str(speed)}]
+        hints: list[dict] = [
+            {"voice": voice},
+            {"speed": str(speed)},
+            {"pitchShift": str(pitch_shift)},
+        ]
         if role:
             hints.append({"role": role})
 

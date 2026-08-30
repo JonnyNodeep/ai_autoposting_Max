@@ -10,27 +10,32 @@ import pytest
 from app.application.pipeline.normalize import _normalize_tts_gen_config
 from app.application.pipeline.tts_chunking import max_chars_for_model
 from app.application.pipeline.tts_voices import (
-    DEFAULT_SPEECHKIT_VOICE,
     SPEECHKIT_MAX_CHARS,
     resolve_role,
 )
 from app.infrastructure.services.yandex_speechkit_client import _extract_audio_bytes
 
 
-def test_normalize_speechkit_defaults():
+def test_normalize_speechkit_coerced_to_sunor():
     cfg = _normalize_tts_gen_config(
         {"enabled": True, "provider": "speechkit", "voice": "dasha", "speed": 0.9}
     )
-    assert cfg["provider"] == "speechkit"
-    assert cfg["voice"] == "dasha"
-    assert cfg["speed"] == 0.9
-    assert cfg["role"] == "neutral"
+    assert cfg["provider"] == "sunor"
+    assert cfg["model"] == "suno"
+    assert cfg["voice"] == "sunor"
 
 
-def test_normalize_legacy_without_provider_is_openai():
+def test_normalize_sunor_defaults():
+    cfg = _normalize_tts_gen_config({"provider": "sunor"})
+    assert cfg["provider"] == "sunor"
+    assert cfg["model"] == "suno"
+    assert cfg["voice"] == "sunor"
+
+
+def test_normalize_legacy_without_provider_is_sunor():
     cfg = _normalize_tts_gen_config({"voice": "shimmer", "speed": 0.85})
-    assert cfg["provider"] == "openai"
-    assert cfg["voice"] == "shimmer"
+    assert cfg["provider"] == "sunor"
+    assert cfg["model"] == "suno"
 
 
 def test_normalize_resets_openai_voice_from_speechkit():
@@ -39,13 +44,6 @@ def test_normalize_resets_openai_voice_from_speechkit():
     )
     assert cfg["provider"] == "openai"
     assert cfg["voice"] == "shimmer"
-
-
-def test_normalize_resets_speechkit_voice_from_openai():
-    cfg = _normalize_tts_gen_config(
-        {"provider": "speechkit", "voice": "shimmer", "speed": 0.9}
-    )
-    assert cfg["voice"] == DEFAULT_SPEECHKIT_VOICE
 
 
 def test_resolve_role_for_dasha():
@@ -99,6 +97,7 @@ async def test_tts_gen_speechkit_route(monkeypatch):
             "provider": "speechkit",
             "voice": "dasha",
             "speed": 0.9,
+            "pitchShift": 50,
             "role": "friendly",
         },
     )
@@ -106,6 +105,7 @@ async def test_tts_gen_speechkit_route(monkeypatch):
     assert "зайца" in called["text"]
     assert called["kwargs"]["voice"] == "dasha"
     assert called["kwargs"]["speed"] == 0.9
+    assert called["kwargs"]["pitch_shift"] == 50.0
     assert called["kwargs"]["role"] == "friendly"
 
 

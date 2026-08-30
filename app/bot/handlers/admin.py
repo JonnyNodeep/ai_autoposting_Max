@@ -14,13 +14,9 @@ from app.infrastructure.services.max_client import MaxAPIHTTPClient
 from app.infrastructure.services.openai_costs_client import OpenAICostsClient
 from app.config import settings
 
-_FREQ_NAMES = {
-    "daily": "1×/день",
-    "2x_day": "2×/день",
-    "3x_day": "3×/день",
-    "2x_week": "2×/нед",
-    "weekly": "1×/нед",
-}
+from app.bot.schedule_frequency import FREQ_LABELS_SHORT
+
+_FREQ_NAMES = FREQ_LABELS_SHORT
 
 _PERIOD_LABELS = {1: "сутки", 7: "неделю", 30: "месяц"}
 
@@ -73,17 +69,48 @@ def register_admin_handlers(dispatcher: UpdateDispatcher) -> None:
                         fmt="markdown",
                     )
 
-                elif callback_data == "admin:users":
+                elif callback_data == "admin:users" or callback_data.startswith("admin:users:"):
+                    days: int | None = None
+                    if callback_data.startswith("admin:users:"):
+                        suffix = callback_data.rsplit(":", 1)[-1]
+                        if suffix == "all":
+                            days = None
+                        else:
+                            try:
+                                days = int(suffix)
+                            except ValueError:
+                                days = None
+                            if days not in (1, 7, 30):
+                                days = None
                     users = await stats_repo.get_all_users(20)
-                    lines = []
+                    user_ids = [u.id for u in users if u.id is not None]
+                    date_from = None
+                    if days is not None:
+                        from datetime import UTC, datetime, timedelta
+
+                        date_from = datetime.now(UTC) - timedelta(days=days)
+                    costs = await stats_repo.get_costs_by_user_ids(
+                        user_ids, date_from=date_from, date_to=None
+                    )
+                    period = (
+                        _PERIOD_LABELS.get(days, f"{days} дн.")
+                        if days is not None
+                        else "всё время"
+                    )
+                    lines = [f"*Пользователи* (расход API за {period}, оценка $)", ""]
                     builder = InlineKeyboardBuilder()
                     for u in users:
                         active = "✅" if u.is_active else "🚫"
-                        lines.append(f"{active} {u.first_name or '?'} ({u.username or 'id:' + str(u.max_user_id)})")
+                        cost = costs.get(u.id, 0.0) if u.id is not None else 0.0
+                        lines.append(
+                            f"{active} {u.first_name or '?'} "
+                            f"({u.username or 'id:' + str(u.max_user_id)}) — ${cost:.2f}"
+                        )
+                    builder.row(*_users_period_buttons(days))
                     builder.row(("Назад в админку", "admin:menu"))
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
-                        text="*Пользователи:*\n\n" + "\n".join(lines),
+                        text="\n".join(lines) if lines else "*Пользователи:* пусто",
                         attachments=[builder.build()],
                         fmt="markdown",
                     )
@@ -328,6 +355,16 @@ def _period_buttons(prefix: str, active_days: int) -> list[tuple[str, str]]:
     for days, label in labels:
         mark = "✓ " if days == active_days else ""
         buttons.append((f"{mark}{label}", f"{prefix}:{days}"))
+    return buttons
+
+
+def _users_period_buttons(active_days: int | None) -> list[tuple[str, str]]:
+    buttons = []
+    all_mark = "✓ " if active_days is None else ""
+    buttons.append((f"{all_mark}Всё", "admin:users:all"))
+    for days, label in ((1, "Сутки"), (7, "Неделя"), (30, "Месяц")):
+        mark = "✓ " if active_days == days else ""
+        buttons.append((f"{mark}{label}", f"admin:users:{days}"))
     return buttons
 
 

@@ -21,6 +21,8 @@ async def _load_runtime_settings() -> None:
     try:
         from app.application.admin.settings_service import (
             KEY_AUDIO_WHITELIST,
+            KEY_DRIVE_WHITELIST,
+            KEY_HIGH_FREQ_WHITELIST,
             KEY_RSS_WHITELIST,
             KEY_VIDEO_WHITELIST,
             AppSettingsService,
@@ -36,6 +38,8 @@ async def _load_runtime_settings() -> None:
                 rss=await svc.get_whitelist(KEY_RSS_WHITELIST),
                 video=await svc.get_whitelist(KEY_VIDEO_WHITELIST),
                 audio=await svc.get_whitelist(KEY_AUDIO_WHITELIST),
+                drive=await svc.get_whitelist(KEY_DRIVE_WHITELIST),
+                high_freq=await svc.get_whitelist(KEY_HIGH_FREQ_WHITELIST),
             )
         logger.info("Runtime admin settings loaded")
     except Exception:

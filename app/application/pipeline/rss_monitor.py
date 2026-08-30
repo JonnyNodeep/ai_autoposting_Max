@@ -24,7 +24,7 @@ DEFAULT_NEWS_RSS: dict[str, Any] = {
     "mode": "on_new",
     "poll_interval_minutes": 5,
     "max_age_hours": 24,
-    "max_posts_per_hour": 3,
+    "publish_interval_minutes": 15,
     "publish_from_msk": "09:00",
     "publish_until_msk": "22:00",
     "niche": "",
@@ -37,6 +37,8 @@ DEFAULT_NEWS_RSS: dict[str, Any] = {
 RSS_KEYWORDS_MAX = 250
 MAX_BOT_MESSAGE_CHARS = 4000
 RSS_KEYWORD_SECTION_MAX_CHARS = 1400
+
+RSS_PUBLISH_INTERVAL_PRESETS = (0, 5, 10, 15, 30, 60)
 
 MSK_OFFSET_HOURS = 3
 _HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
@@ -404,6 +406,19 @@ def format_publish_window_label(from_msk: str, until_msk: str) -> str:
     return f"{from_s}–{until_s} МСК"
 
 
+def format_publish_spacing_label(minutes: int) -> str:
+    try:
+        mins = int(minutes)
+    except (TypeError, ValueError):
+        mins = 15
+    if mins <= 0:
+        return "сразу (пачкой)"
+    if mins % 60 == 0:
+        hours = mins // 60
+        return f"{hours} ч" if hours > 1 else "1 ч"
+    return f"{mins} мин"
+
+
 def normalize_news_rss(raw: Any) -> dict[str, Any]:
     data = dict(DEFAULT_NEWS_RSS)
     if not isinstance(raw, dict):
@@ -424,11 +439,28 @@ def normalize_news_rss(raw: Any) -> dict[str, Any]:
         data["max_age_hours"] = max(1, int(raw.get("max_age_hours", 24)))
     except (TypeError, ValueError):
         data["max_age_hours"] = 24
-    try:
-        # 0 = unlimited (no hourly cap)
-        data["max_posts_per_hour"] = max(0, int(raw.get("max_posts_per_hour", 3)))
-    except (TypeError, ValueError):
-        data["max_posts_per_hour"] = 3
+    if "publish_interval_minutes" in raw:
+        try:
+            data["publish_interval_minutes"] = max(
+                0, int(raw.get("publish_interval_minutes", 15))
+            )
+        except (TypeError, ValueError):
+            data["publish_interval_minutes"] = 15
+    elif "max_posts_per_hour" in raw:
+        try:
+            legacy = max(0, int(raw.get("max_posts_per_hour", 3)))
+        except (TypeError, ValueError):
+            legacy = 3
+        if legacy <= 0:
+            data["publish_interval_minutes"] = 0
+        elif legacy <= 3:
+            data["publish_interval_minutes"] = 15
+        else:
+            data["publish_interval_minutes"] = 10
+    else:
+        data["publish_interval_minutes"] = int(
+            DEFAULT_NEWS_RSS["publish_interval_minutes"]
+        )
     data["publish_from_msk"] = parse_hhmm(
         raw.get("publish_from_msk"), default=str(DEFAULT_NEWS_RSS["publish_from_msk"])
     )
@@ -1363,19 +1395,21 @@ async def collect_new_for_channel(
     )
 
 
-async def rate_limit_allows(
+async def publish_spacing_allows(
     repo: SQLARssSeenRepository,
     *,
     channel_id: int,
-    max_posts_per_hour: int,
+    publish_interval_minutes: int,
     now: datetime | None = None,
 ) -> bool:
-    if max_posts_per_hour <= 0:
+    """Return True when another RSS post may be published for the channel."""
+    if publish_interval_minutes <= 0:
         return True
     now = now or datetime.now(UTC)
-    since = now - timedelta(hours=1)
-    count = await repo.count_published_since(channel_id, since)
-    return count < max_posts_per_hour
+    last = await repo.last_published_at(channel_id)
+    if last is None:
+        return True
+    return (now - last) >= timedelta(minutes=int(publish_interval_minutes))
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:

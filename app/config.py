@@ -13,6 +13,7 @@ class AppSettings(BaseSettings):
     webhook_url: str = Field(default="")
     webhook_secret: str = Field(default="")
     api_token: str = Field(default="")
+    consume_quota_only_on_publish: bool = Field(default=True)
 
 
 class PostgresSettings(BaseSettings):
@@ -56,6 +57,9 @@ class OpenAISettings(BaseSettings):
     image_quality: str = Field(default="medium", alias="OPENAI_IMAGE_QUALITY")
     search_model: str = Field(default="gpt-4o-mini-search-preview", alias="OPENAI_SEARCH_MODEL")
     tts_model: str = Field(default="gpt-4o-mini-tts", alias="OPENAI_TTS_MODEL")
+    tale_model: str = Field(default="gpt-5.4", alias="OPENAI_TALE_MODEL")
+    tale_image_size: str = Field(default="1536x1024", alias="TALE_IMAGE_SIZE")
+    tale_image_quality: str = Field(default="low", alias="TALE_IMAGE_QUALITY")
 
     @field_validator("image_quality")
     @classmethod
@@ -64,6 +68,15 @@ class OpenAISettings(BaseSettings):
         normalized = (value or "medium").strip().lower()
         if normalized not in allowed:
             raise ValueError(f"OPENAI_IMAGE_QUALITY must be one of: {sorted(allowed)}")
+        return normalized
+
+    @field_validator("tale_image_quality")
+    @classmethod
+    def validate_tale_image_quality(cls, value: str) -> str:
+        allowed = {"low", "medium", "high"}
+        normalized = (value or "low").strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"TALE_IMAGE_QUALITY must be one of: {sorted(allowed)}")
         return normalized
 
 
@@ -105,10 +118,27 @@ class YandexSettings(BaseSettings):
     tts_proxy: str = Field(default="", alias="YANDEX_TTS_PROXY")
 
 
+class SunorSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    api_key: str = Field(default="", alias="SUNOR_API_KEY")
+    base_url: str = Field(default="https://sunor.cc/api/v1", alias="SUNOR_BASE_URL")
+    poll_timeout_s: int = Field(default=900, alias="SUNOR_POLL_TIMEOUT_S")
+
+
 class RssSettings(BaseSettings):
     model_config = {"extra": "ignore"}
 
     http_proxy: str = Field(default="", alias="RSS_HTTP_PROXY")
+
+
+class GoogleDriveSettings(BaseSettings):
+    model_config = {"extra": "ignore"}
+
+    service_account_json: str = Field(default="", alias="GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON")
+    service_account_json_b64: str = Field(
+        default="", alias="GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64"
+    )
 
 
 class FeatureSettings(BaseSettings):
@@ -117,6 +147,8 @@ class FeatureSettings(BaseSettings):
     rss_whitelist: str = Field(default="", alias="FEATURE_RSS_WHITELIST")
     video_whitelist: str = Field(default="", alias="FEATURE_VIDEO_WHITELIST")
     audio_whitelist: str = Field(default="", alias="FEATURE_AUDIO_WHITELIST")
+    drive_whitelist: str = Field(default="", alias="FEATURE_DRIVE_WHITELIST")
+    high_freq_whitelist: str = Field(default="", alias="FEATURE_HIGH_FREQ_WHITELIST")
 
 
 class Settings(BaseSettings):
@@ -130,7 +162,9 @@ class Settings(BaseSettings):
     vidgo: VidGoSettings = VidGoSettings()
     telegram: TelegramSettings = TelegramSettings()
     yandex: YandexSettings = YandexSettings()
+    sunor: SunorSettings = SunorSettings()
     rss: RssSettings = RssSettings()
+    google_drive: GoogleDriveSettings = GoogleDriveSettings()
     features: FeatureSettings = FeatureSettings()
 
 

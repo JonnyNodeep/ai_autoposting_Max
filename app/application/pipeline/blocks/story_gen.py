@@ -239,6 +239,7 @@ class StoryGenBlock:
             if queued_topic:
                 ctx.meta["topic_queue_popped"] = True
                 ctx.meta["topic_queue_remaining"] = remaining
+                ctx.meta["topic_queue_used"] = queued_topic
                 ctx.meta["topic_queue_block"] = "post_gen"
                 ctx.meta["shared_topic_queue"] = remaining
                 exhausted = len(remaining) == 0
@@ -263,6 +264,37 @@ class StoryGenBlock:
                             logger.warning(f"story topic queue alert failed: {e}")
 
         await ctx.notify("📖 Придумываю сказку...")
+        topic_for_gpt = (queued_topic or "").strip() or brief or ctx.channel_title or ""
+        fmt = (story_format or "fairy_tale").strip() or "fairy_tale"
+        if fmt == "bedtime":
+            fmt = "fairy_tale"
+
+        # Fairy-tale / Sunor video path: script + scenes (hard ≤4500, gpt-5.4).
+        if fmt == "fairy_tale":
+            from app.application.pipeline.tale_video import generate_tale_script
+
+            composed = topic_for_gpt
+            if brief and queued_topic:
+                composed = f"{queued_topic}\n\nБриф канала:\n{brief}"
+            elif brief and not queued_topic:
+                composed = brief
+            script = await generate_tale_script(topic=composed)
+            ctx.story_script = script.story
+            ctx.post_text = script.caption or script.story.split("\n", 1)[0][:180]
+            ctx.meta["tale_script"] = script.to_meta()
+            ctx.meta["tale_title"] = script.title
+            ctx.meta["post_topic"] = (queued_topic or "").strip() or topic_from_post_text(
+                ctx.post_text
+            )
+            logger.info(
+                f"story_gen tale_video caption_len={len(ctx.post_text)} "
+                f"story_len={len(ctx.story_script)} scenes={len(script.scenes)} "
+                f"run_id={ctx.run_id}"
+            )
+            return
+
+        # Legacy podcast / non-fairy path (OpenAI TTS text only).
+        _ = (target_minutes, age_range)
         caption, story = await generate_fairy_tale(
             ctx.openai_client,
             brief=brief,

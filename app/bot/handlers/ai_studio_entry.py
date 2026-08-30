@@ -1,8 +1,10 @@
 from app.application.auth.feature_access import (
+    drive_allowed,
     rss_allowed,
     sanitize_premium_blocks,
     video_allowed,
 )
+from app.bot.schedule_frequency import freq_label
 from app.bot.ai_studio_text_input import clear_text_inputs
 from app.bot.keyboards.builder import InlineKeyboardBuilder
 from app.bot.states.ai_studio import AIStudioFSM, AIStudioStep, IMAGE_MODELS, VIDEO_MODELS
@@ -20,6 +22,7 @@ BLOCK_LABELS = {
     "post_gen": "Генерация поста",
     "schedule": "Расписание публикаций",
     "news_rss": "RSS-новости",
+    "drive_video": "Google Drive",
 }
 
 REDIS_TTL = 1800
@@ -82,6 +85,8 @@ async def handle_entry_callback(
 
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
+        if not state:
+            state = await fsm.start(max_user_id)
 
         from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 
@@ -113,8 +118,7 @@ async def handle_entry_callback(
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
         if not state:
-            await _session_expired(max_user_id, max_client)
-            return True
+            state = await fsm.start(max_user_id)
 
         ch = await channel_repo.get_by_id(channel_id)
         if not ch or not await owns_channel(channel_id):
@@ -190,8 +194,6 @@ async def handle_entry_callback(
 
         sched = blocks.get("schedule", {})
         if sched.get("enabled"):
-            freq_names = {"daily": "1 раз в день", "2x_day": "2 раза в день", "3x_day": "3 раза в день",
-                          "2x_week": "2 раза в неделю", "weekly": "1 раз в неделю"}
             times_msk = []
             for t in sched.get("times", []):
                 parts = t.split(":")
@@ -199,10 +201,11 @@ async def handle_entry_callback(
                 m = parts[1] if len(parts) > 1 else "00"
                 times_msk.append(f"{h:02d}:{m}")
             times_str = ", ".join(times_msk) + " МСК" if times_msk else "не задано"
-            lines.append(f"⏱ *Частота:* {freq_names.get(sched['frequency'], sched['frequency'])}")
+            lines.append(f"⏱ *Частота:* {freq_label(sched['frequency'])}")
             lines.append(f"⏱ *Время:* {times_str}")
             if sched.get("per_slot_prompts"):
                 slot_prompts = sched.get("slot_prompts") or {}
+                slot_modes = sched.get("slot_prompt_modes") or {}
                 slot_lines = []
                 for t in sched.get("times", []):
                     parts = t.split(":")
@@ -210,9 +213,15 @@ async def handle_entry_callback(
                     m = parts[1] if len(parts) > 1 else "00"
                     label = f"{h:02d}:{m}"
                     if str(slot_prompts.get(t) or "").strip():
-                        slot_lines.append(f"{label} — свой")
+                        if str(slot_modes.get(t) or "").strip().lower() == "append":
+                            mark = f"{label} — +к общему"
+                        else:
+                            mark = f"{label} — свой"
                     else:
-                        slot_lines.append(f"{label} — общий")
+                        mark = f"{label} — общий"
+                    if str((sched.get("slot_image_addons") or {}).get(t) or "").strip():
+                        mark += ", картинка+"
+                    slot_lines.append(mark)
                 if slot_lines:
                     lines.append(f"⏱ *Промпты слотов:* {', '.join(slot_lines)}")
 
@@ -240,6 +249,15 @@ async def handle_entry_callback(
             for u in feeds[:5]:
                 short = u if len(u) <= 60 else u[:57] + "…"
                 lines.append(f"📰 • {short}")
+
+        drive = blocks.get("drive_video") or {}
+        if drive.get("enabled") and drive_allowed(max_user_id):
+            folder = str(drive.get("folder_id") or "").strip()
+            short_folder = folder[:40] + "…" if len(folder) > 40 else (folder or "—")
+            caption = (drive.get("fixed_caption") or "").strip()
+            cap_preview = caption[:60] + "…" if len(caption) > 60 else (caption or "—")
+            lines.append(f"📁 *Google Drive:* папка `{short_folder}`")
+            lines.append(f"📁 *Подпись:* {cap_preview}")
 
         lines.append("")
 
@@ -329,6 +347,7 @@ async def handle_entry_callback(
         lines.append(f"*Статус:* {status_text}")
 
         builder = InlineKeyboardBuilder()
+        builder.row(("← К выбору канала", "ai_studio"))
         builder.row(("На главную", "main_menu"))
 
         await max_client.send_message_to_user(

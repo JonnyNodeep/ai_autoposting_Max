@@ -82,6 +82,43 @@ class UsageStatsRepository:
             "source": "generation_logs",
         }
 
+    async def get_costs_by_user_ids(
+        self,
+        user_ids: list[int],
+        *,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[int, float]:
+        if not user_ids:
+            return {}
+        filters = [GenerationLogModel.user_id.in_(user_ids)]
+        if date_from is not None:
+            filters.append(GenerationLogModel.created_at >= date_from)
+        if date_to is not None:
+            filters.append(GenerationLogModel.created_at < date_to)
+        stmt = (
+            select(
+                GenerationLogModel.user_id,
+                func.coalesce(func.sum(GenerationLogModel.estimated_cost), 0),
+            )
+            .where(*filters)
+            .group_by(GenerationLogModel.user_id)
+        )
+        result = await self._session.execute(stmt)
+        return {int(uid): round(float(total or 0), 4) for uid, total in result.all()}
+
+    async def get_user_cost(
+        self,
+        user_id: int,
+        *,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> float:
+        costs = await self.get_costs_by_user_ids(
+            [user_id], date_from=date_from, date_to=date_to
+        )
+        return costs.get(int(user_id), 0.0)
+
     async def record_member_event(
         self,
         channel_id: int,

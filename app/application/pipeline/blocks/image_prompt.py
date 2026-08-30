@@ -5,6 +5,7 @@ from typing import Any
 from loguru import logger
 
 from app.application.pipeline.context import PipelineContext
+from app.application.pipeline.normalize import mix_slot_image_addon, resolve_slot_image_addon
 from app.application.pipeline.recent_topics import (
     fetch_recent_post_topics,
     topic_from_post_text,
@@ -75,6 +76,16 @@ def _news_item_from_ctx(ctx: PipelineContext) -> dict[str, Any] | None:
     return news if isinstance(news, dict) else None
 
 
+def _slot_image_addon_from_ctx(ctx: PipelineContext) -> str:
+    meta = ctx.meta if isinstance(ctx.meta, dict) else {}
+    schedule = meta.get("pipeline_schedule")
+    if not isinstance(schedule, dict):
+        schedule = {}
+    raw_slot = meta.get("slot_time")
+    slot_time = str(raw_slot).strip() if raw_slot is not None else ""
+    return resolve_slot_image_addon(schedule, slot_time or None)
+
+
 class ImagePromptBlock:
     """Loads image prompt into context. Does not call image APIs."""
 
@@ -138,6 +149,7 @@ class ImagePromptBlock:
                 config.get("instruction") or DEFAULT_FROM_TOPIC_INSTRUCTION
             ).strip()
             prompt = f"{instruction}\n\n{topic}" if instruction else topic
+            prompt = mix_slot_image_addon(prompt, _slot_image_addon_from_ctx(ctx))
             ctx.meta["image_source"] = "ai"
             ctx.image_prompt = _append_visual_style(prompt, visual_style)
             logger.info(
@@ -160,6 +172,7 @@ class ImagePromptBlock:
                 config.get("instruction") or DEFAULT_FROM_POST_INSTRUCTION
             ).strip()
             prompt = f"{instruction}\n\n{post}" if instruction else post
+            prompt = mix_slot_image_addon(prompt, _slot_image_addon_from_ctx(ctx))
             ctx.meta["image_source"] = "ai"
             ctx.image_prompt = _append_visual_style(prompt, visual_style)
             logger.info(

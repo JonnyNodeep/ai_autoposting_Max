@@ -13,6 +13,7 @@ services:
     restart: always
     volumes:
       - ./uploads:/app/uploads
+      - ./JSON_DRIVE:/app/JSON_DRIVE:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -31,6 +32,8 @@ services:
       redis:
         condition: service_healthy
     restart: always
+    volumes:
+      - ./JSON_DRIVE:/app/JSON_DRIVE:ro
 
   postgres:
     image: postgres:16-alpine

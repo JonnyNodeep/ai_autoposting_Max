@@ -8,6 +8,8 @@ from app.application.auth.admin_access import (
 )
 from app.application.auth.register_user import RegisterUserUseCase
 from app.application.channels.create_channel import CreateChannelUseCase
+from app.application.channels.transfer_channel_ownership import TransferChannelOwnershipUseCase
+from app.application.pipeline.manage_pipeline import PipelineManager
 from app.application.channels.telegram_bind import unbind_telegram
 from app.application.channels.watermark_logo import (
     save_watermark_logo,
@@ -23,11 +25,120 @@ from app.config import settings
 from app.infrastructure.database.session import async_session_factory
 from app.infrastructure.redis.client import get_redis
 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
+from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
 from app.infrastructure.repositories.subscription_repository import SQLAlchemySubscriptionRepository
 from app.infrastructure.repositories.user_repository import SQLAlchemyUserRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 
 WM_LOGO_WAIT_TTL = 300
+
+_CHANNEL_ADD_STEPS = (
+    "1. Открой нужный канал в MAX\n"
+    "2. Добавь [Автопостинг Макс](https://max.ru/id665405125178_3_bot) в подписчики\n"
+    "3. Назначь его администратором\n"
+    "4. Включи право «Писать посты» (остальные отключи)\n"
+    "5. Канал появится здесь автоматически\n\n"
+    "Если бот уже был в канале раньше — сначала удалите его из канала, затем добавьте заново.\n\n"
+    "⚡️ Сразу после добавления бот предложит настроить канал."
+)
+
+
+async def _send_bot_added_response(
+    max_user_id: int,
+    chat_id: int,
+    channel,
+    max_client: MaxAPIHTTPClient,
+    *,
+    transferred: bool = False,
+    already_connected: bool = False,
+) -> None:
+    try:
+        membership = await max_client.get_chat_members_me(chat_id)
+        is_admin = membership.get("is_admin", False) if membership else False
+    except Exception:
+        is_admin = False
+
+    if already_connected:
+        if is_admin:
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    f"Канал *{channel.title}* уже подключён к вашему аккаунту.\n\n"
+                    f"Можете продолжить настройку или открыть AI Content Studio."
+                ),
+                attachments=[InlineKeyboardBuilder.channel_actions(channel.id)],
+                fmt="markdown",
+            )
+        else:
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=(
+                    f"Канал *{channel.title}* уже подключён.\n\n"
+                    f"Чтобы я мог публиковать посты, назначь меня *администратором* "
+                    f"с правом «Писать посты»."
+                ),
+                fmt="markdown",
+            )
+        return
+
+    if is_admin:
+        if transferred:
+            text = (
+                f"Канал *{channel.title}* перепривязан к вашему аккаунту!\n\n"
+                f"Настройки канала сохранены. Хочешь продолжить настройку?"
+            )
+        else:
+            text = (
+                f"Автопостинг Макс добавлен в канал *{channel.title}*!\n\n"
+                f"Хочешь настроить его сейчас? "
+                f"Я проанализирую твои посты, определю стиль, "
+                f"сгенерирую SEO-описание и логотип."
+            )
+        try:
+            await max_client.send_message_to_user(
+                user_id=max_user_id,
+                text=text,
+                attachments=[InlineKeyboardBuilder.channel_actions(channel.id)],
+                fmt="markdown",
+            )
+        except Exception as e:
+            logger.error(f"Welcome message failed for channel {channel.id}: {e}")
+    else:
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                f"Бот добавлен в подписчики канала *{channel.title}*.\n\n"
+                f"Чтобы я мог публиковать посты, назначь меня *администратором* "
+                f"с правом «Писать посты».\n"
+                f"После этого канал появится в твоём списке."
+            ),
+            fmt="markdown",
+        )
+
+
+async def _notify_previous_owner(
+    previous_owner_id: int,
+    channel,
+    user_repo: SQLAlchemyUserRepository,
+    max_client: MaxAPIHTTPClient,
+) -> None:
+    previous_user = await user_repo.get_by_id(previous_owner_id)
+    if not previous_user or not previous_user.max_user_id:
+        return
+    try:
+        await max_client.send_message_to_user(
+            user_id=previous_user.max_user_id,
+            text=(
+                f"Канал *{channel.title}* перепривязан другим администратором.\n\n"
+                f"Он больше не отображается в вашем списке «Мои каналы»."
+            ),
+            fmt="markdown",
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to notify previous owner user_id={previous_owner_id} "
+            f"channel_id={channel.id}: {e}"
+        )
 
 
 def _extract_image_url_from_message(msg: dict) -> str | None:
@@ -166,19 +277,49 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 )
 
             existing = await channel_repo.get_by_max_chat_id(chat_id)
-            if existing and existing.is_active:
-                await max_client.close()
-                return
+            transferred = False
+            pipeline_mgr = PipelineManager(SQLAPipelineRunRepository(session))
 
             try:
-                use_case = CreateChannelUseCase(
-                    channel_repo=channel_repo,
-                    subscription_repo=subscription_repo,
-                    max_client=max_client,
-                    user_repo=user_repo,
-                )
-                channel = await use_case.execute(owner_id=user.id, max_chat_id=chat_id)
-                await session.commit()
+                if existing and existing.is_active and existing.owner_id == user.id:
+                    channel = existing
+                    await _send_bot_added_response(
+                        max_user_id,
+                        chat_id,
+                        channel,
+                        max_client,
+                        already_connected=True,
+                    )
+                    await max_client.close()
+                    return
+
+                if existing and existing.is_active and existing.owner_id != user.id:
+                    transfer_uc = TransferChannelOwnershipUseCase(
+                        channel_repo=channel_repo,
+                        subscription_repo=subscription_repo,
+                        max_client=max_client,
+                        user_repo=user_repo,
+                        pipeline_manager=pipeline_mgr,
+                    )
+                    result = await transfer_uc.execute(existing, user.id)
+                    channel = result.channel
+                    transferred = True
+                    await session.commit()
+                    await _notify_previous_owner(
+                        result.previous_owner_id,
+                        channel,
+                        user_repo,
+                        max_client,
+                    )
+                else:
+                    use_case = CreateChannelUseCase(
+                        channel_repo=channel_repo,
+                        subscription_repo=subscription_repo,
+                        max_client=max_client,
+                        user_repo=user_repo,
+                    )
+                    channel = await use_case.execute(owner_id=user.id, max_chat_id=chat_id)
+                    await session.commit()
             except ValueError as e:
                 await max_client.send_message_to_user(
                     user_id=max_user_id,
@@ -196,37 +337,13 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 await max_client.close()
                 return
 
-            try:
-                membership = await max_client.get_chat_members_me(chat_id)
-                is_admin = membership.get("is_admin", False) if membership else False
-            except Exception:
-                is_admin = False
-
-            if is_admin:
-                try:
-                    await max_client.send_message_to_user(
-                        user_id=max_user_id,
-                        text=(
-                            f"Автопостинг Макс добавлен в канал *{channel.title}*!\n\n"
-                            f"Хочешь настроить его сейчас? "
-                            f"Я проанализирую твои посты, определю стиль, "
-                            f"сгенерирую SEO-описание и логотип."
-                        ),
-                        attachments=[InlineKeyboardBuilder.channel_actions(channel.id)],
-                        fmt="markdown",
-                    )
-                except Exception as e:
-                    logger.error(f"Welcome message failed for channel {channel.id}: {e}")
-            else:
-                await max_client.send_message_to_user(
-                    user_id=max_user_id,
-                    text=(
-                        f"Бот добавлен в подписчики канала *{channel.title}*.\n\n"
-                        f"Чтобы я мог публиковать посты, назначь меня *администратором* "
-                        f"с правом «Писать посты».\n"
-                        f"После этого канал появится в твоём списке."
-                    ),
-                )
+            await _send_bot_added_response(
+                max_user_id,
+                chat_id,
+                channel,
+                max_client,
+                transferred=transferred,
+            )
 
             await max_client.close()
 
@@ -299,15 +416,7 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                 elif callback_data == "channels:add":
                     builder = InlineKeyboardBuilder()
                     builder.row(("На главную", "main_menu"))
-                    add_text = (
-                        "Чтобы добавить канал:\n\n"
-                        "1. Открой нужный канал в MAX\n"
-                        "2. Добавь [Автопостинг Макс](https://max.ru/id665405125178_3_bot) в подписчики\n"
-                        "3. Назначь его администратором\n"
-                        "4. Включи право «Писать посты» (остальные отключи)\n"
-                        "5. Канал появится здесь автоматически\n\n"
-                        "⚡️ Сразу после добавления бот предложит настроить канал."
-                    )
+                    add_text = f"Чтобы добавить канал:\n\n{_CHANNEL_ADD_STEPS}"
                     if channels_limit is None or channels_limit > 0:
                         add_text = (
                             f"Доступно: {format_channels_quota(channels_count, channels_limit)} каналов\n\n"
@@ -360,6 +469,14 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                                 await topic_repo.delete(t.id)
                             await plan_repo.delete(p.id)
 
+                        from app.infrastructure.repositories.pipeline_run_repository import (
+                            SQLAPipelineRunRepository,
+                        )
+                        from app.application.pipeline.manage_pipeline import PipelineManager
+
+                        pr = SQLAPipelineRunRepository(session)
+                        mgr = PipelineManager(pr)
+                        await mgr.stop_by_channel(channel_id)
                         await channel_repo.delete(channel_id)
                         await session.commit()
 
@@ -368,16 +485,9 @@ def register_channel_handlers(dispatcher: UpdateDispatcher) -> None:
                             sf = AIStudioFSM()
                             await sf.remove_channel_pipeline(max_user_id, channel_id)
                         except Exception:
-                            pass
-
-                        from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
-                        from app.application.pipeline.manage_pipeline import PipelineManager
-                        try:
-                            pr = SQLAPipelineRunRepository(session)
-                            mgr = PipelineManager(pr)
-                            await mgr.stop_by_channel(channel_id)
-                        except Exception:
-                            pass
+                            logger.exception(
+                                f"FSM cleanup failed after channel delete channel_id={channel_id}"
+                            )
 
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
@@ -646,15 +756,11 @@ async def handle_channels_list(
             text=(
                 "У тебя пока нет каналов.\n\n"
                 "Как добавить бота:\n"
-                "1. Добавь [Автопостинг Макс](https://max.ru/id665405125178_3_bot) в подписчики канала\n"
-                "2. Назначь его администратором\n"
-                "3. Включи только «Писать посты»\n"
-                "4. Остальные права отключи\n\n"
-                "Бот появится здесь автоматически."
+                f"{_CHANNEL_ADD_STEPS}"
             ),
             attachments=[builder.build()],
-        fmt="markdown",
-    )
+            fmt="markdown",
+        )
         return
 
     lines = []

@@ -383,6 +383,9 @@ class SchedulerService:
     async def run_pipeline_step(self, run_id: int, slot_time: str | None = None) -> None:
         max_client: MaxAPIHTTPClient | None = None
         telegram_client = None
+        owner_id: int | None = None
+        channel_title = ""
+        slot_label = (str(slot_time).strip() if slot_time else "") or ""
         try:
             async with async_session_factory() as session:
                 from app.application.pipeline.context import PipelineContext
@@ -397,6 +400,7 @@ class SchedulerService:
                 if not run or run.status.value != "active":
                     return
 
+                owner_id = int(run.max_user_id) if run.max_user_id else None
                 max_client = MaxAPIHTTPClient()
                 guard = await self._subscription_guard(
                     session,
@@ -417,10 +421,39 @@ class SchedulerService:
                     run.max_user_id,
                 )
 
+                from app.application.auth.feature_access import drive_allowed
+                from app.application.pipeline.drive_monitor import (
+                    apply_drive_video_patch,
+                    is_drive_trigger,
+                )
+
+                if is_drive_trigger(blocks_for_run) and not drive_allowed(run.max_user_id):
+                    logger.debug(
+                        f"Drive pipeline skipped — user not whitelisted "
+                        f"run_id={run_id} max_user_id={run.max_user_id}"
+                    )
+                    return
+
                 ch_repo = SQLAlchemyChannelRepository(session)
                 channel = await ch_repo.get_by_id(run.channel_id)
                 if not channel:
                     return
+                if not channel.is_active:
+                    from app.application.pipeline.manage_pipeline import PipelineManager
+
+                    await PipelineManager(repo).stop(run_id)
+                    await session.commit()
+                    logger.warning(
+                        f"Pipeline {run_id} stopped: channel_id={run.channel_id} is inactive"
+                    )
+                    return
+
+                from app.application.channels.sync_channel_meta import sync_channel_meta
+
+                channel = await sync_channel_meta(
+                    channel, max_client, ch_repo, pipe_repo=repo
+                )
+                channel_title = (channel.title or "").strip() or "канал"
 
                 openai_client = OpenAIService()
                 if getattr(channel, "telegram_chat_id", None):
@@ -429,7 +462,7 @@ class SchedulerService:
 
                 ctx = PipelineContext(
                     channel=channel,
-                    channel_link=run.channel_link or channel.channel_link or "",
+                    channel_link=(channel.channel_link or "").strip(),
                     run_id=run_id,
                     max_client=max_client,
                     openai_client=openai_client,
@@ -442,10 +475,73 @@ class SchedulerService:
                     ctx.meta["slot_time"] = str(slot_time).strip()
                 ctx = await PipelineRunner().run(ctx, blocks_for_run)
 
-                from app.application.billing.quota import consume_generation
+                if isinstance(ctx.meta, dict):
+                    drive_file_id = str(ctx.meta.get("drive_file_id") or "").strip()
+                    published = bool(ctx.meta.get("published"))
+                    skipped = bool(ctx.meta.get("publish_skipped"))
+                    if drive_file_id and published and not skipped:
+                        from app.infrastructure.repositories.drive_published_repository import (
+                            SQLADrivePublishedRepository,
+                        )
+                        from app.application.pipeline.drive_monitor import normalize_drive_video
+                        from app.infrastructure.services.google_drive_client import delete_file
 
-                await consume_generation(
-                    sub_repo, sub, max_user_id=run.max_user_id
+                        drive_repo = SQLADrivePublishedRepository(session)
+                        await drive_repo.mark_published(
+                            channel_id=int(run.channel_id),
+                            drive_file_id=drive_file_id,
+                            file_name=str(ctx.meta.get("drive_file_name") or ""),
+                            pipeline_run_id=run_id,
+                        )
+                        drive_cfg = normalize_drive_video(
+                            (run.blocks_config or {}).get("drive_video")
+                        )
+                        if drive_cfg.get("delete_after_publish"):
+                            try:
+                                await delete_file(drive_file_id)
+                                logger.info(
+                                    f"Drive file deleted run_id={run_id} "
+                                    f"file_id={drive_file_id}"
+                                )
+                            except Exception as exc:
+                                logger.exception(
+                                    f"Drive delete failed run_id={run_id} "
+                                    f"file_id={drive_file_id}: {exc}"
+                                )
+                                if run.max_user_id and max_client is not None:
+                                    try:
+                                        await max_client.send_message_to_user(
+                                            user_id=int(run.max_user_id),
+                                            text=(
+                                                "Видео опубликовано, но не удалось "
+                                                f"убрать файл из Google Drive: {exc}"
+                                            ),
+                                        )
+                                    except Exception:
+                                        pass
+                    if ctx.meta.get("drive_low_stock_notify") is not None:
+                        run.blocks_config = apply_drive_video_patch(
+                            run.blocks_config,
+                            {
+                                "low_stock_notified_at_remaining": int(
+                                    ctx.meta["drive_low_stock_notify"]
+                                )
+                            },
+                        )
+                    if ctx.meta.get("drive_low_stock_reset"):
+                        run.blocks_config = apply_drive_video_patch(
+                            run.blocks_config,
+                            {"low_stock_notified_at_remaining": None},
+                        )
+
+                from app.application.billing.quota import maybe_consume_generation
+
+                await maybe_consume_generation(
+                    sub_repo,
+                    sub,
+                    ctx.meta,
+                    max_user_id=run.max_user_id,
+                    run_id=run_id,
                 )
 
                 if isinstance(ctx.meta, dict) and ctx.meta.get("topic_queue_popped"):
@@ -455,10 +551,16 @@ class SchedulerService:
 
                     remaining = ctx.meta.get("topic_queue_remaining") or []
                     block_type = str(ctx.meta.get("topic_queue_block") or "post_gen")
+                    used_topic = str(
+                        ctx.meta.get("topic_queue_used")
+                        or ctx.meta.get("post_topic")
+                        or ""
+                    ).strip() or None
                     run.blocks_config = apply_topic_queue_remaining(
                         run.blocks_config or {},
                         remaining,
                         block_type=block_type,
+                        used_topic=used_topic,
                     )
                     logger.info(
                         f"Pipeline {run_id} topic_queue remaining={len(remaining)} "
@@ -468,12 +570,18 @@ class SchedulerService:
                         from app.bot.handlers.ai_studio_pipeline import (
                             apply_topic_queue_to_fsm,
                         )
+                        from app.application.pipeline.topic_queue import (
+                            topic_history_from_blocks_config,
+                        )
 
                         await apply_topic_queue_to_fsm(
                             int(run.max_user_id),
                             int(run.channel_id),
                             remaining,
                             block_type=block_type,
+                            history=topic_history_from_blocks_config(
+                                run.blocks_config
+                            ),
                         )
                     except Exception as e:
                         logger.warning(
@@ -489,11 +597,74 @@ class SchedulerService:
                 logger.info(f"Pipeline {run_id} step completed slot_time={slot_time!r}")
         except Exception as e:
             logger.exception(f"Pipeline {run_id} step failed: {e}")
+            await self._notify_pipeline_step_failure(
+                run_id=run_id,
+                owner_id=owner_id,
+                channel_title=channel_title,
+                slot_label=slot_label,
+                error=e,
+                max_client=max_client,
+            )
         finally:
             if max_client is not None:
                 await max_client.close()
             if telegram_client is not None:
                 await telegram_client.close()
+
+    async def _notify_pipeline_step_failure(
+        self,
+        *,
+        run_id: int,
+        owner_id: int | None,
+        channel_title: str,
+        slot_label: str,
+        error: Exception,
+        max_client: MaxAPIHTTPClient | None,
+    ) -> None:
+        title = (channel_title or "").strip() or "канал"
+        err_text = str(error).strip()[:500] or type(error).__name__
+        if slot_label:
+            owner_text = (
+                f"Слот {slot_label} канала «{title}» не опубликован: {err_text}"
+            )
+        else:
+            owner_text = f"Слот канала «{title}» не опубликован: {err_text}"
+
+        notify_client = max_client
+        created_client = False
+        try:
+            if owner_id:
+                if notify_client is None:
+                    notify_client = MaxAPIHTTPClient()
+                    created_client = True
+                try:
+                    await notify_client.send_message_to_user(
+                        user_id=owner_id,
+                        text=owner_text,
+                    )
+                except Exception as send_exc:
+                    logger.warning(
+                        f"Pipeline {run_id} owner fail DM failed "
+                        f"owner={owner_id}: {send_exc}"
+                    )
+        finally:
+            if created_client and notify_client is not None:
+                try:
+                    await notify_client.close()
+                except Exception:
+                    pass
+
+        try:
+            from app.infrastructure.services.error_notifier import error_notifier
+
+            await error_notifier.notify(
+                error,
+                f"scheduler.run_pipeline_step run_id={run_id}",
+            )
+        except Exception as notify_exc:
+            logger.warning(
+                f"Pipeline {run_id} admin fail notify failed: {notify_exc}"
+            )
 
     async def poll_rss_and_publish(self, run_id: int) -> None:
         max_client: MaxAPIHTTPClient | None = None
@@ -510,7 +681,7 @@ class SchedulerService:
                     is_rss_trigger,
                     is_within_publish_window,
                     normalize_news_rss,
-                    rate_limit_allows,
+                    publish_spacing_allows,
                 )
                 from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
                 from app.infrastructure.repositories.pipeline_run_repository import SQLAPipelineRunRepository
@@ -551,8 +722,23 @@ class SchedulerService:
                 channel = await ch_repo.get_by_id(run.channel_id)
                 if not channel:
                     return
+                if not channel.is_active:
+                    from app.application.pipeline.manage_pipeline import PipelineManager
+
+                    await PipelineManager(repo).stop(run_id)
+                    await session.commit()
+                    logger.warning(
+                        f"RSS pipeline {run_id} stopped: channel_id={run.channel_id} is inactive"
+                    )
+                    return
 
                 max_client = MaxAPIHTTPClient()
+                from app.application.channels.sync_channel_meta import sync_channel_meta
+
+                channel = await sync_channel_meta(
+                    channel, max_client, ch_repo, pipe_repo=repo
+                )
+
                 guard = await self._subscription_guard(
                     session,
                     user_id=run.user_id,
@@ -563,13 +749,16 @@ class SchedulerService:
                     return
                 sub, sub_repo = guard
 
-                max_per_hour = int(news["max_posts_per_hour"])
-                if not await rate_limit_allows(
+                publish_interval = int(news["publish_interval_minutes"])
+                if not await publish_spacing_allows(
                     rss_repo,
                     channel_id=run.channel_id,
-                    max_posts_per_hour=max_per_hour,
+                    publish_interval_minutes=publish_interval,
                 ):
-                    logger.info(f"RSS poll rate-limited run_id={run_id}")
+                    logger.info(
+                        f"RSS poll spacing wait run_id={run_id} "
+                        f"interval={publish_interval}m"
+                    )
                     return
 
                 candidates = await collect_new_for_channel(
@@ -580,7 +769,7 @@ class SchedulerService:
                 if not candidates:
                     return
 
-                max_per_tick = 10
+                max_per_tick = 1 if publish_interval > 0 else 10
                 to_publish = candidates[:max_per_tick]
 
                 openai_client = OpenAIService()
@@ -594,7 +783,7 @@ class SchedulerService:
 
                 from app.application.billing.quota import (
                     QuotaDenied,
-                    consume_generation,
+                    maybe_consume_generation,
                     subscription_allows_publish,
                 )
 
@@ -608,21 +797,10 @@ class SchedulerService:
                         )
                         break
 
-                    if not await rate_limit_allows(
-                        rss_repo,
-                        channel_id=run.channel_id,
-                        max_posts_per_hour=max_per_hour,
-                    ):
-                        logger.info(
-                            f"RSS poll rate-limited mid-batch run_id={run_id} "
-                            f"published={published}"
-                        )
-                        break
-
                     item = await enrich_news_item(item)
                     ctx = PipelineContext(
                         channel=channel,
-                        channel_link=run.channel_link or channel.channel_link or "",
+                        channel_link=(channel.channel_link or "").strip(),
                         run_id=run_id,
                         max_client=max_client,
                         openai_client=openai_client,
@@ -636,7 +814,7 @@ class SchedulerService:
                     )
 
                     if post_cfg.get("enabled"):
-                        await PipelineRunner().run(ctx, run.blocks_config or {})
+                        ctx = await PipelineRunner().run(ctx, run.blocks_config or {})
                     else:
                         from app.application.pipeline.blocks.post_gen import (
                             _mirror_to_telegram,
@@ -653,11 +831,13 @@ class SchedulerService:
                             body,
                             body_without_cta=body,
                             add_channel_link=False,
-                            max_link=run.channel_link or channel.channel_link or "",
+                            max_link=(channel.channel_link or "").strip(),
                             telegram_link=getattr(channel, "telegram_link", None),
                             channel_title=channel.title or "канал",
                         )
                         ctx.post_text = body
+                        if isinstance(ctx.meta, dict):
+                            ctx.meta["published"] = True
                         await _mirror_to_telegram(ctx, tg_text)
 
                     await rss_repo.mark_seen(
@@ -667,8 +847,12 @@ class SchedulerService:
                             pipeline_run_id=run_id,
                         )
                     )
-                    sub = await consume_generation(
-                        sub_repo, sub, max_user_id=run.max_user_id
+                    sub = await maybe_consume_generation(
+                        sub_repo,
+                        sub,
+                        ctx.meta,
+                        max_user_id=run.max_user_id,
+                        run_id=run_id,
                     )
                     now = datetime.now(UTC)
                     run.last_run_at = now

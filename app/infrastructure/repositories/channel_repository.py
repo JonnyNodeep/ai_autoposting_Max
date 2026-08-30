@@ -66,6 +66,7 @@ class SQLAlchemyChannelRepository(ChannelRepository):
             update(ChannelModel)
             .where(ChannelModel.id == channel.id)
             .values(
+                owner_id=channel.owner_id,
                 title=channel.title,
                 description=channel.description,
                 topic=channel.topic,

@@ -66,6 +66,24 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
         await self._session.flush()
         return subscription
 
+    async def try_consume_generation(self, subscription_id: int) -> int | None:
+        """Atomically increment generations_used if under quota. Returns new used or None."""
+        stmt = (
+            update(SubscriptionModel)
+            .where(
+                SubscriptionModel.id == subscription_id,
+                SubscriptionModel.generations_used < SubscriptionModel.generations_quota,
+            )
+            .values(generations_used=SubscriptionModel.generations_used + 1)
+            .returning(SubscriptionModel.generations_used)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        return int(row)
+
     async def deactivate(self, user_id: int) -> None:
         await self._session.execute(
             update(SubscriptionModel)

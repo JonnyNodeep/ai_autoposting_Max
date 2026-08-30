@@ -4,12 +4,20 @@
 <h2>Пользователи</h2>
 <form method="get" class="row card">
   <input type="search" name="q" value="{{ q }}" placeholder="id / username / имя" />
-  <button type="submit">Найти</button>
+  <label>С
+    <input type="date" name="date_from" value="{{ date_from }}" />
+  </label>
+  <label>По
+    <input type="date" name="date_to" value="{{ date_to }}" />
+  </label>
+  <button type="submit">Показать</button>
+  <a class="muted" href="/admin/users?q={{ q }}&amp;date_from=&amp;date_to=">Всё время</a>
 </form>
+<p class="muted">Расход API — оценка OpenAI ($) за выбранный период.</p>
 <div class="card">
   <table>
     <thead>
-      <tr><th>ID</th><th>MAX</th><th>Имя</th><th>Скидка</th><th>Активен</th><th></th></tr>
+      <tr><th>ID</th><th>MAX</th><th>Имя</th><th>Скидка</th><th>Активен</th><th>Расход API</th><th></th></tr>
     </thead>
     <tbody>
       {% for u in users %}
@@ -19,17 +27,18 @@
         <td>{{ u.full_name }} {% if u.username %}<span class="muted">@{{ u.username }}</span>{% endif %}</td>
         <td>{% if u.discount_percent %}{{ u.discount_percent }}%{% else %}—{% endif %}</td>
         <td>{{ "да" if u.is_active else "нет" }}</td>
-        <td><a href="/admin/users/{{ u.id }}">Открыть</a></td>
+        <td>${{ "%.2f"|format(costs.get(u.id, 0)) }}</td>
+        <td><a href="/admin/users/{{ u.id }}?date_from={{ date_from }}&amp;date_to={{ date_to }}">Открыть</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="muted">Нет пользователей</td></tr>
+      <tr><td colspan="7" class="muted">Нет пользователей</td></tr>
       {% endfor %}
     </tbody>
   </table>
   <div class="row muted" style="margin-top:1rem">
-    {% if page > 1 %}<a href="?q={{ q }}&page={{ page - 1 }}">Назад</a>{% endif %}
+    {% if page > 1 %}<a href="?q={{ q }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;page={{ page - 1 }}">Назад</a>{% endif %}
     Стр. {{ page }} / {{ pages }} ({{ total }})
-    {% if page < pages %}<a href="?q={{ q }}&page={{ page + 1 }}">Далее</a>{% endif %}
+    {% if page < pages %}<a href="?q={{ q }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;page={{ page + 1 }}">Далее</a>{% endif %}
   </div>
 </div>
 {% endblock %}

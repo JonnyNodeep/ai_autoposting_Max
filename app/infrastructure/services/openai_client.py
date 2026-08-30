@@ -12,6 +12,18 @@ from loguru import logger
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 
 
+def _usage_total_tokens(response: Any) -> int:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    total = getattr(usage, "total_tokens", None)
+    if total is not None:
+        return int(total or 0)
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    return prompt + completion
+
+
 class OpenAIService(OpenAIClient):
     def __init__(self) -> None:
         self._client = AsyncOpenAI(api_key=settings.openai.api_key)
@@ -19,18 +31,57 @@ class OpenAIService(OpenAIClient):
         self._image_model = settings.openai.image_model
         self._image_quality = settings.openai.image_quality
 
+    async def _record_usage(
+        self,
+        operation: str,
+        model: str,
+        *,
+        tokens_used: int = 0,
+        chars: int = 0,
+        image_quality: str | None = None,
+    ) -> None:
+        from app.application.admin.billing_context import get_billing_user_id
+        from app.application.admin.cost_tracker import GenerationLogService
+
+        user_id = get_billing_user_id()
+        if not user_id:
+            return
+        try:
+            await GenerationLogService().log(
+                user_id=user_id,
+                operation=operation,
+                tokens_used=tokens_used,
+                model=model,
+                chars=chars,
+                image_quality=image_quality,
+            )
+        except Exception:
+            logger.exception(
+                f"Failed to record OpenAI cost op={operation} user={user_id}"
+            )
+
     async def generate_text(
-        self, prompt: str, system_prompt: str | None = None
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        *,
+        model: str | None = None,
     ) -> str:
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        use_model = (model or "").strip() or self._text_model
         response = await self._client.chat.completions.create(
-            model=self._text_model,
+            model=use_model,
             messages=messages,
             temperature=0.8,
+        )
+        await self._record_usage(
+            "text",
+            use_model,
+            tokens_used=_usage_total_tokens(response),
         )
         return response.choices[0].message.content or ""
 
@@ -41,6 +92,11 @@ class OpenAIService(OpenAIClient):
             n=1,
             size="1024x1024",
             quality=self._image_quality,
+        )
+        await self._record_usage(
+            "image",
+            self._image_model,
+            image_quality=self._image_quality,
         )
         image_data = response.data[0]
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,6 +129,11 @@ class OpenAIService(OpenAIClient):
             messages=[{"role": "user", "content": content}],
             max_completion_tokens=500,
         )
+        await self._record_usage(
+            "vision",
+            self._text_model,
+            tokens_used=_usage_total_tokens(response),
+        )
         return response.choices[0].message.content or ""
 
     async def search_web(self, query: str) -> str:
@@ -94,6 +155,11 @@ class OpenAIService(OpenAIClient):
             ],
             web_search_options={"search_context_size": "medium"},
             max_completion_tokens=2000,
+        )
+        await self._record_usage(
+            "search",
+            search_model,
+            tokens_used=_usage_total_tokens(response),
         )
         content = response.choices[0].message.content or ""
 
@@ -160,6 +226,12 @@ class OpenAIService(OpenAIClient):
                 part_path = UPLOAD_DIR / f"tts_part_{uuid.uuid4().hex[:12]}_{i}.{api_fmt}"
                 part_path.write_bytes(response.content)
                 part_paths.append(part_path)
+
+            await self._record_usage(
+                "tts",
+                tts_model,
+                chars=sum(len(c) for c in chunks),
+            )
 
             out_path = UPLOAD_DIR / f"tts_{uuid.uuid4().hex[:12]}.mp3"
             concat_audio_to_mp3(part_paths, out_path)

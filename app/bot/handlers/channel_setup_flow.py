@@ -8,6 +8,14 @@ from app.application.auth.admin_access import (
 )
 from app.application.auth.register_user import RegisterUserUseCase
 from app.application.channels.channel_setup import LoadSamplePostsUseCase, UpdateChannelSetupUseCase
+from app.application.auth.feature_access import high_freq_allowed, premium_invite_message
+from app.bot.schedule_frequency import (
+    FREQ_LABELS,
+    expected_slots,
+    freq_label,
+    is_high_freq,
+    is_multi_slot_freq,
+)
 from app.application.content.content_generation import (
     AnalyzeStyleUseCase,
     GenerateDescriptionUseCase,
@@ -44,13 +52,7 @@ TOPIC_NAMES = {
     "custom": "Своя тема",
 }
 
-FREQ_NAMES = {
-    "daily": "1 раз в день",
-    "2x_week": "2 раза в неделю",
-    "weekly": "1 раз в неделю",
-    "2x_day": "2 раза в день",
-    "3x_day": "3 раза в день",
-}
+FREQ_NAMES = FREQ_LABELS
 
 REDIS_TTL = 3600
 
@@ -114,7 +116,7 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                     await max_client.send_message_to_user(
                         user_id=max_user_id,
                         text=f"Тема: *{message_text}*\n\nТеперь выбери частоту публикаций:",
-                        attachments=[InlineKeyboardBuilder.frequency_presets()],
+                        attachments=[InlineKeyboardBuilder.frequency_presets(max_user_id)],
                         fmt="markdown",
                     )
                     await max_client.close()
@@ -183,7 +185,10 @@ def register_setup_message_handlers(dispatcher: UpdateDispatcher) -> None:
                             f"Пожелания пользователя: {message_text}\n\n"
                             f"Ответ — ТОЛЬКО готовый системный промпт на русском (без пояснений)."
                         )
-                        response = await openai_client.generate_text(prompt=user_prompt)
+                        from app.application.admin.billing_context import billing_user
+
+                        with billing_user(ch.owner_id):
+                            response = await openai_client.generate_text(prompt=user_prompt)
                         ch.style_profile.custom_prompt = response.strip()[:2000]
                         await channel_repo.update(ch)
                         await session.commit()
@@ -403,13 +408,20 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                         await max_client.send_message_to_user(
                             user_id=max_user_id,
                             text=f"Тема: *{topic_name}*\n\nТеперь выбери частоту публикаций:",
-                            attachments=[InlineKeyboardBuilder.frequency_presets()],
+                            attachments=[InlineKeyboardBuilder.frequency_presets(max_user_id)],
                             fmt="markdown",
                         )
 
                 elif callback_data.startswith("setup:frequency:"):
                     freq_key = callback_data.split(":")[2]
-                    freq_name = FREQ_NAMES.get(freq_key, freq_key)
+                    if is_high_freq(freq_key) and not high_freq_allowed(max_user_id):
+                        await max_client.send_message_to_user(
+                            user_id=max_user_id,
+                            text=premium_invite_message("Частота 6–8 публикаций в день"),
+                            attachments=[InlineKeyboardBuilder.frequency_presets(max_user_id)],
+                        )
+                        return
+                    freq_name = freq_label(freq_key)
                     state = await fsm.get_state(max_user_id)
                     ch_id = state["channel_id"] if state else None
                     if ch_id:
@@ -418,8 +430,8 @@ def register_setup_callback_handlers(dispatcher: UpdateDispatcher) -> None:
                         await session.commit()
                     await fsm.set_data(max_user_id, {"frequency": freq_key})
 
-                    if ch_id and freq_key in ("2x_day", "3x_day"):
-                        slots = {"2x_day": 2, "3x_day": 3}[freq_key]
+                    if ch_id and is_multi_slot_freq(freq_key):
+                        slots = expected_slots(freq_key)
                         redis_local = await get_redis()
                         await redis_local.setex(f"setup_slots:{max_user_id}", REDIS_TTL,
                             json.dumps({"ch_id": ch_id, "slot": 0, "total": slots, "times": []}))

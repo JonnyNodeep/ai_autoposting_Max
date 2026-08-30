@@ -100,40 +100,52 @@ def test_normalize_preserves_publish_window():
     assert parse_hhmm("25:00", default="09:00") == "09:00"
 
 
-def test_normalize_max_posts_per_hour_zero_unlimited():
-    n = normalize_news_rss({"max_posts_per_hour": 0})
-    assert n["max_posts_per_hour"] == 0
-    n2 = normalize_news_rss({"max_posts_per_hour": -5})
-    assert n2["max_posts_per_hour"] == 0
-    n3 = normalize_news_rss({"max_posts_per_hour": 10})
-    assert n3["max_posts_per_hour"] == 10
+def test_normalize_publish_interval_and_legacy_hourly_cap():
+    n = normalize_news_rss({"publish_interval_minutes": 30})
+    assert n["publish_interval_minutes"] == 30
+    n0 = normalize_news_rss({"publish_interval_minutes": 0})
+    assert n0["publish_interval_minutes"] == 0
+    legacy_unlimited = normalize_news_rss({"max_posts_per_hour": 0})
+    assert legacy_unlimited["publish_interval_minutes"] == 0
+    legacy_3 = normalize_news_rss({"max_posts_per_hour": 3})
+    assert legacy_3["publish_interval_minutes"] == 15
+    legacy_10 = normalize_news_rss({"max_posts_per_hour": 10})
+    assert legacy_10["publish_interval_minutes"] == 10
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_allows_zero_is_unlimited():
-    from app.application.pipeline.rss_monitor import rate_limit_allows
+async def test_publish_spacing_allows_zero_is_immediate():
+    from app.application.pipeline.rss_monitor import publish_spacing_allows
 
     repo = AsyncMock()
-    repo.count_published_since = AsyncMock(return_value=999)
-    assert await rate_limit_allows(
-        repo, channel_id=1, max_posts_per_hour=0
+    repo.last_published_at = AsyncMock(return_value=datetime.now(UTC))
+    assert await publish_spacing_allows(
+        repo, channel_id=1, publish_interval_minutes=0
     ) is True
-    repo.count_published_since.assert_not_called()
+    repo.last_published_at.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_allows_respects_cap():
-    from app.application.pipeline.rss_monitor import rate_limit_allows
+async def test_publish_spacing_allows_respects_interval():
+    from app.application.pipeline.rss_monitor import publish_spacing_allows
 
+    now = datetime.now(UTC)
     repo = AsyncMock()
-    repo.count_published_since = AsyncMock(return_value=3)
-    assert await rate_limit_allows(
-        repo, channel_id=1, max_posts_per_hour=3
+    repo.last_published_at = AsyncMock(return_value=now - timedelta(minutes=5))
+    assert await publish_spacing_allows(
+        repo, channel_id=1, publish_interval_minutes=10, now=now
     ) is False
-    repo.count_published_since = AsyncMock(return_value=2)
-    assert await rate_limit_allows(
-        repo, channel_id=1, max_posts_per_hour=3
+    assert await publish_spacing_allows(
+        repo, channel_id=1, publish_interval_minutes=5, now=now
     ) is True
+
+
+def test_format_publish_spacing_label():
+    from app.application.pipeline.rss_monitor import format_publish_spacing_label
+
+    assert format_publish_spacing_label(0) == "сразу (пачкой)"
+    assert format_publish_spacing_label(15) == "15 мин"
+    assert format_publish_spacing_label(60) == "1 ч"
 
 
 def test_is_within_publish_window_default_daytime():

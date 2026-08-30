@@ -19,11 +19,13 @@ from app.application.admin.broadcasts import SEGMENTS, create_broadcast
 from app.application.admin.grant_generations import GrantGenerationsUseCase
 from app.application.admin.settings_service import (
     KEY_AUDIO_WHITELIST,
+    KEY_DRIVE_WHITELIST,
+    KEY_HIGH_FREQ_WHITELIST,
     KEY_RSS_WHITELIST,
     KEY_VIDEO_WHITELIST,
     AppSettingsService,
 )
-from app.application.auth.feature_access import set_runtime_whitelists
+from app.application.auth.feature_access import high_freq_allowed, set_runtime_whitelists
 from app.application.billing.pricing import set_runtime_prices
 from app.infrastructure.database.session import async_session_factory
 from app.infrastructure.models.admin_audit_log import AdminAuditLogModel
@@ -51,6 +53,40 @@ def _flash(request: Request, message: str, kind: str = "ok") -> None:
 
 def _pop_flash(request: Request) -> dict | None:
     return request.session.pop("flash", None)
+
+
+def _parse_admin_date_range(
+    date_from: str, date_to: str
+) -> tuple[Any | None, Any | None, str, str]:
+    """Parse YYYY-MM-DD into UTC [from, to) datetimes. Empty = no bound (all time)."""
+    from datetime import UTC, date, datetime, timedelta
+
+    raw_from = (date_from or "").strip()
+    raw_to = (date_to or "").strip()
+
+    def _parse_one(value: str) -> date | None:
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    d_from = _parse_one(raw_from)
+    d_to = _parse_one(raw_to)
+    if d_from and d_to and d_from > d_to:
+        d_from, d_to = d_to, d_from
+        raw_from, raw_to = raw_to, raw_from
+
+    dt_from = (
+        datetime(d_from.year, d_from.month, d_from.day, tzinfo=UTC) if d_from else None
+    )
+    dt_to = (
+        datetime(d_to.year, d_to.month, d_to.day, tzinfo=UTC) + timedelta(days=1)
+        if d_to
+        else None
+    )
+    return dt_from, dt_to, raw_from if d_from else "", raw_to if d_to else ""
 
 
 @admin_web_router.get("/login", response_class=HTMLResponse)
@@ -113,29 +149,72 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 
 @admin_web_router.get("/users", response_class=HTMLResponse)
-async def users_list(request: Request, q: str = "", page: int = 1) -> HTMLResponse:
+async def users_list(
+    request: Request,
+    q: str = "",
+    page: int = 1,
+    date_from: str = "",
+    date_to: str = "",
+) -> HTMLResponse:
+    from datetime import date as date_cls
+
     page = max(1, int(page or 1))
     per_page = 50
+    params = request.query_params
+    has_date_filter = "date_from" in params or "date_to" in params
+    raw_from = (date_from or "").strip()
+    raw_to = (date_to or "").strip()
+    if not has_date_filter:
+        today = date_cls.today()
+        raw_from = today.replace(day=1).isoformat()
+        raw_to = today.isoformat()
+    dt_from, dt_to, raw_from, raw_to = _parse_admin_date_range(raw_from, raw_to)
+
     async with async_session_factory() as session:
         repo = SQLAlchemyUserRepository(session)
         users, total = await repo.search(q, offset=(page - 1) * per_page, limit=per_page)
+        costs = await UsageStatsRepository(session).get_costs_by_user_ids(
+            [u.id for u in users if u.id is not None],
+            date_from=dt_from,
+            date_to=dt_to,
+        )
     pages = max(1, math.ceil(total / per_page))
     return templates.TemplateResponse(
         request,
         "users_list.html",
         {
             "users": users,
+            "costs": costs,
             "q": q,
             "page": page,
             "pages": pages,
             "total": total,
+            "date_from": raw_from,
+            "date_to": raw_to,
             "flash": _pop_flash(request),
         },
     )
 
 
 @admin_web_router.get("/users/{user_id}", response_class=HTMLResponse)
-async def user_detail(request: Request, user_id: int) -> HTMLResponse:
+async def user_detail(
+    request: Request,
+    user_id: int,
+    date_from: str = "",
+    date_to: str = "",
+) -> HTMLResponse:
+    from datetime import date as date_cls
+
+    params = request.query_params
+    has_date_filter = "date_from" in params or "date_to" in params
+    raw_from = (date_from or "").strip()
+    raw_to = (date_to or "").strip()
+    if not has_date_filter:
+        today = date_cls.today()
+        raw_from = today.replace(day=1).isoformat()
+        raw_to = today.isoformat()
+    dt_from, dt_to, raw_from, raw_to = _parse_admin_date_range(raw_from, raw_to)
+
     async with async_session_factory() as session:
         users = SQLAlchemyUserRepository(session)
         subs = SQLAlchemySubscriptionRepository(session)
@@ -146,6 +225,9 @@ async def user_detail(request: Request, user_id: int) -> HTMLResponse:
             return RedirectResponse("/admin/users", status_code=303)
         sub = await subs.get_active_by_user(user_id)
         pays = await payments.get_by_user(user_id, limit=20)
+        api_cost = await UsageStatsRepository(session).get_user_cost(
+            user_id, date_from=dt_from, date_to=dt_to
+        )
         channels = list(
             (
                 await session.execute(
@@ -174,9 +256,109 @@ async def user_detail(request: Request, user_id: int) -> HTMLResponse:
             "payments": pays,
             "channels": channels,
             "audits": audits,
+            "api_cost": api_cost,
+            "date_from": raw_from,
+            "date_to": raw_to,
+            "high_freq_allowed": high_freq_allowed(user.max_user_id),
             "flash": _pop_flash(request),
         },
     )
+
+
+@admin_web_router.post("/users/{user_id}/channels/{channel_id}/refresh-link")
+async def user_channel_refresh_link(
+    request: Request, user_id: int, channel_id: int
+) -> RedirectResponse:
+    from app.application.channels.sync_channel_meta import sync_channel_meta
+    from app.infrastructure.repositories.channel_repository import (
+        SQLAlchemyChannelRepository,
+    )
+    from app.infrastructure.repositories.pipeline_run_repository import (
+        SQLAPipelineRunRepository,
+    )
+
+    async with async_session_factory() as session:
+        ch_repo = SQLAlchemyChannelRepository(session)
+        channel = await ch_repo.get_by_id(channel_id)
+        if not channel or int(channel.owner_id) != int(user_id):
+            _flash(request, "Канал не найден", "err")
+            return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+        before = channel.channel_link
+        client = MaxAPIHTTPClient()
+        try:
+            channel = await sync_channel_meta(
+                channel,
+                client,
+                ch_repo,
+                pipe_repo=SQLAPipelineRunRepository(session),
+            )
+            await write_audit(
+                session,
+                actor="admin",
+                action="refresh_channel_link",
+                user_id=user_id,
+                payload={
+                    "channel_id": channel_id,
+                    "before": before,
+                    "after": channel.channel_link,
+                },
+            )
+            await session.commit()
+            _flash(
+                request,
+                f"Ссылка обновлена: {channel.channel_link or '— (MAX не вернул link)'}",
+            )
+        except Exception as exc:
+            logger.exception("refresh_channel_link failed")
+            _flash(request, f"Не удалось обновить: {exc}", "err")
+        finally:
+            await client.close()
+    return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+
+
+@admin_web_router.post("/users/{user_id}/channels/{channel_id}/set-link")
+async def user_channel_set_link(
+    request: Request,
+    user_id: int,
+    channel_id: int,
+    channel_link: str = Form(""),
+) -> RedirectResponse:
+    from app.infrastructure.repositories.channel_repository import (
+        SQLAlchemyChannelRepository,
+    )
+    from app.infrastructure.repositories.pipeline_run_repository import (
+        SQLAPipelineRunRepository,
+    )
+
+    link = (channel_link or "").strip()
+    async with async_session_factory() as session:
+        ch_repo = SQLAlchemyChannelRepository(session)
+        channel = await ch_repo.get_by_id(channel_id)
+        if not channel or int(channel.owner_id) != int(user_id):
+            _flash(request, "Канал не найден", "err")
+            return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+        before = channel.channel_link
+        channel.channel_link = link or None
+        await ch_repo.update(channel)
+        pipe_repo = SQLAPipelineRunRepository(session)
+        active = await pipe_repo.get_active_by_channel(channel_id)
+        if active is not None and link:
+            active.channel_link = link
+            await pipe_repo.update(active)
+        await write_audit(
+            session,
+            actor="admin",
+            action="set_channel_link",
+            user_id=user_id,
+            payload={
+                "channel_id": channel_id,
+                "before": before,
+                "after": channel.channel_link,
+            },
+        )
+        await session.commit()
+    _flash(request, f"Ссылка сохранена: {link or '—'}")
+    return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
 
 
 @admin_web_router.post("/users/{user_id}/discount")
@@ -287,14 +469,23 @@ async def user_set_plan(
     from app.domain.value_objects.subscription_status import SubscriptionStatus
     from app.domain.value_objects.subscription_tier import SubscriptionTier
 
+    ppd = int(posts_per_day)
+    high_freq_ppd = {6, 7, 8}
+
     async with async_session_factory() as session:
+        users = SQLAlchemyUserRepository(session)
         subs = SQLAlchemySubscriptionRepository(session)
+        user = await users.get_by_id(user_id)
         sub = await subs.get_active_by_user(user_id)
         if sub is None:
             _flash(request, "Нет активной подписки", "err")
             return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+        if ppd in high_freq_ppd and not high_freq_allowed(user.max_user_id if user else None):
+            _flash(request, "6–8 пуб./день доступны только пользователям из whitelist", "err")
+            return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
         try:
-            q = quote(tier, int(posts_per_day))
+            ref_ppd = 5 if ppd in high_freq_ppd else ppd
+            q = quote(tier, ref_ppd)
             new_tier = SubscriptionTier(q.tier)
         except (ValueError, KeyError) as exc:
             _flash(request, str(exc), "err")
@@ -306,10 +497,10 @@ async def user_set_plan(
             "generations_quota": sub.generations_quota,
         }
         sub.tier = new_tier
-        sub.posts_per_day = q.posts_per_day
+        sub.posts_per_day = ppd
         sub.channels_limit = q.channels
         if reset_quota:
-            sub.generations_quota = calc_quota(q.posts_per_day)
+            sub.generations_quota = calc_quota(ppd)
             sub.generations_used = 0
         if sub.status == SubscriptionStatus.EXPIRED:
             sub.status = SubscriptionStatus.ACTIVE
@@ -416,6 +607,8 @@ async def settings_page(request: Request) -> HTMLResponse:
         rss = await svc.get_whitelist(KEY_RSS_WHITELIST)
         video = await svc.get_whitelist(KEY_VIDEO_WHITELIST)
         audio = await svc.get_whitelist(KEY_AUDIO_WHITELIST)
+        drive = await svc.get_whitelist(KEY_DRIVE_WHITELIST)
+        high_freq = await svc.get_whitelist(KEY_HIGH_FREQ_WHITELIST)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -424,6 +617,8 @@ async def settings_page(request: Request) -> HTMLResponse:
             "rss": rss,
             "video": video,
             "audio": audio,
+            "drive": drive,
+            "high_freq": high_freq,
             "flash": _pop_flash(request),
         },
     )
@@ -461,20 +656,24 @@ async def settings_features(
     rss: str = Form(""),
     video: str = Form(""),
     audio: str = Form(""),
+    drive: str = Form(""),
+    high_freq: str = Form(""),
 ) -> RedirectResponse:
     async with async_session_factory() as session:
         svc = AppSettingsService(session)
         await svc.set_whitelist(KEY_RSS_WHITELIST, rss)
         await svc.set_whitelist(KEY_VIDEO_WHITELIST, video)
         await svc.set_whitelist(KEY_AUDIO_WHITELIST, audio)
+        await svc.set_whitelist(KEY_DRIVE_WHITELIST, drive)
+        await svc.set_whitelist(KEY_HIGH_FREQ_WHITELIST, high_freq)
         await write_audit(
             session,
             actor="admin",
             action="set_feature_whitelists",
-            payload={"rss": rss, "video": video, "audio": audio},
+            payload={"rss": rss, "video": video, "audio": audio, "drive": drive, "high_freq": high_freq},
         )
         await session.commit()
-    set_runtime_whitelists(rss=rss, video=video, audio=audio)
+    set_runtime_whitelists(rss=rss, video=video, audio=audio, drive=drive, high_freq=high_freq)
     _flash(request, "Whitelist сохранён")
     return RedirectResponse("/admin/settings", status_code=303)
 

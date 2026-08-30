@@ -26,4 +26,6 @@ logs/
 data/
 
 /uploads/
+/JSON_DRIVE/
+/backups/
 /tmp/

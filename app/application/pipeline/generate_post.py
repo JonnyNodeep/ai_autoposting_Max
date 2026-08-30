@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from loguru import logger
@@ -7,6 +8,11 @@ from loguru import logger
 from app.application.pipeline.recent_topics import topic_from_post_text
 
 MAX_TOPIC_ATTEMPTS = 15
+TALE_POST_CAP_DEFAULT = 400
+_TALE_POST_LEN_RE = re.compile(
+    r"(?:не\s+больше|до|max|максимум|≤|<=)\s*(\d+)\s*символ",
+    re.IGNORECASE,
+)
 
 
 class TopicDedupExhausted(Exception):
@@ -152,6 +158,102 @@ async def generate_post_text(
         style=style,
     )
     return text, approved
+
+
+def _tale_post_max_chars(brief: str) -> int:
+    """Parse max length from post brief, else use a safe default."""
+    m = _TALE_POST_LEN_RE.search(brief or "")
+    if m:
+        try:
+            return max(80, min(int(m.group(1)), TALE_POST_CAP_DEFAULT))
+        except (TypeError, ValueError):
+            pass
+    return TALE_POST_CAP_DEFAULT
+
+
+def _trim_tale_post(text: str, max_chars: int) -> str:
+    body = (text or "").strip()
+    if len(body) <= max_chars:
+        return body
+    cut = body[: max_chars - 1].rsplit(" ", 1)[0].strip()
+    if not cut:
+        cut = body[: max_chars - 1].strip()
+    if cut and cut[-1] not in ".!?…":
+        cut += "."
+    return cut
+
+
+async def generate_tale_post_caption(
+    openai_client: Any,
+    brief: str,
+    channel_title: str,
+    *,
+    tale_title: str,
+    tale_caption: str,
+    story_excerpt: str = "",
+    bold_headings: bool = True,
+    use_emoji: bool = True,
+    comments_enabled: bool = False,
+) -> str:
+    """Generate a channel post caption for an already-produced fairy-tale video."""
+    max_chars = _tale_post_max_chars(brief)
+    style = _PostStyle(
+        bold_headings=bold_headings,
+        use_emoji=use_emoji,
+        comments_enabled=comments_enabled,
+    )
+    bold_rule = (
+        "- Заголовок можно оформить жирным markdown: **текст**"
+        if style.bold_headings
+        else "- Не используй жирное выделение"
+    )
+    emoji_rule = (
+        "- Можно 1–2 уместных эмодзи"
+        if style.use_emoji
+        else "- Без эмодзи"
+    )
+    if style.comments_enabled:
+        cta_rule = (
+            "- Можно мягко предложить поделиться с друзьями, если это уместно по брифу"
+        )
+    else:
+        cta_rule = (
+            "- Комментарии в канале НЕ подключены: не проси писать в комментариях"
+        )
+
+    title = (tale_title or "").strip() or "Сказка"
+    caption = (tale_caption or "").strip()
+    excerpt = (story_excerpt or "").strip()[:400]
+
+    system_prompt = (
+        "Ты — автор подписей к постам с видео-сказками для детских каналов MAX. "
+        "Сказка уже записана и приложена как видео. "
+        "Твоя задача — написать короткий текст поста по брифу канала."
+    )
+    user_prompt = (
+        f"Канал: «{channel_title or 'канал'}».\n\n"
+        f"Бриф / правила для текста поста (главный приоритет):\n"
+        f"«{(brief or '').strip()}»\n\n"
+        f"Контекст готовой сказки (используй как основу, не меняй сюжет):\n"
+        f"- Название: {title}\n"
+        f"- Анонс: {caption or '—'}\n"
+        f"- Начало: {excerpt or '—'}\n\n"
+        f"Правила:\n"
+        f"- Язык: русский\n"
+        f"- Это подпись к уже готовому видео, не придумывай новую тему\n"
+        f"- Не пересказывай всю сказку — только превью/анонс по брифу\n"
+        f"- НЕ добавляй призыв «подписаться на канал» — система добавит его сама\n"
+        f"- Длина: не больше {max_chars} символов\n"
+        f"{bold_rule}\n"
+        f"{emoji_rule}\n"
+        f"{cta_rule}\n"
+        f"- Ответ — ТОЛЬКО готовый текст поста, без пояснений"
+    )
+    result = await openai_client.generate_text(
+        prompt=user_prompt,
+        system_prompt=system_prompt,
+    )
+    return _trim_tale_post((result or "").strip(), max_chars)
 
 
 class _PostStyle:

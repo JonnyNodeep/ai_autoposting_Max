@@ -4,8 +4,12 @@ import copy
 import uuid
 from typing import Any
 
+from app.application.pipeline.drive_monitor import DEFAULT_DRIVE_VIDEO, normalize_drive_video
 from app.application.pipeline.rss_monitor import DEFAULT_NEWS_RSS, normalize_news_rss
-from app.application.pipeline.topic_queue import normalize_topic_queue
+from app.application.pipeline.topic_queue import (
+    normalize_topic_history,
+    normalize_topic_queue,
+)
 
 STEP_ORDER = (
     "story_gen",
@@ -13,6 +17,8 @@ STEP_ORDER = (
     "image_gen",
     "video_gen",
     "tts_gen",
+    "sunor_gen",
+    "drive_video",
     "post_gen",
 )
 
@@ -47,10 +53,30 @@ _CONFIG_KEYS = {
         "model",
         "voice",
         "speed",
+        "pitchShift",
         "role",
         "response_format",
         "instructions",
         "instructions_preset",
+    ),
+    "sunor_gen": (
+        "music_mode",
+        "gpt_description_prompt",
+        "prompt",
+        "tags",
+        "negative_tags",
+        "title",
+        "vocal_gender",
+        "make_instrumental",
+        "lyrics_enabled",
+        "lyrics_prompt",
+        "prompt_source",
+        "target_duration_sec",
+        "extend_enabled",
+        "continue_at_sec",
+        "continue_prompt",
+        "pick_variant",
+        "attach_cover_image",
     ),
     "post_gen": (
         "mode",
@@ -61,15 +87,24 @@ _CONFIG_KEYS = {
         "use_emoji",
         "comments_enabled",
         "topic_queue",
+        "topic_history",
+        "topic_gen_extra",
     ),
-    "schedule": ("frequency", "times", "per_slot_prompts", "slot_prompts"),
+    "schedule": (
+        "frequency",
+        "times",
+        "per_slot_prompts",
+        "slot_prompts",
+        "slot_prompt_modes",
+        "slot_image_addons",
+    ),
     "news_rss": (
         "feeds",
         "sites",
         "mode",
         "poll_interval_minutes",
         "max_age_hours",
-        "max_posts_per_hour",
+        "publish_interval_minutes",
         "publish_from_msk",
         "publish_until_msk",
         "niche",
@@ -78,12 +113,22 @@ _CONFIG_KEYS = {
         "exclude_keywords",
         "keywords_source",
     ),
+    "drive_video": (
+        "folder_id",
+        "fixed_caption",
+        "low_stock_threshold",
+        "low_stock_notified_at_remaining",
+        "delete_after_publish",
+    ),
 }
 
 
 def _normalize_post_gen_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(config or {})
     cfg["topic_queue"] = normalize_topic_queue(cfg.get("topic_queue"))
+    cfg["topic_history"] = normalize_topic_history(cfg.get("topic_history"))
+    extra = str(cfg.get("topic_gen_extra") or "").strip()
+    cfg["topic_gen_extra"] = extra[:1500]
     return cfg
 
 
@@ -117,11 +162,14 @@ def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
     from app.application.pipeline.tts_voices import (
         DEFAULT_OPENAI_SPEED,
         DEFAULT_OPENAI_VOICE,
+        DEFAULT_SPEECHKIT_PITCH_SHIFT,
         DEFAULT_SPEECHKIT_ROLE,
         DEFAULT_SPEECHKIT_SPEED,
         DEFAULT_SPEECHKIT_VOICE,
+        DEFAULT_TTS_PROVIDER,
         TTS_PROVIDER_OPENAI,
         TTS_PROVIDER_SPEECHKIT,
+        TTS_PROVIDER_SUNOR,
         TTS_PROVIDERS,
         openai_voice_ids,
         resolve_role,
@@ -132,11 +180,23 @@ def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
     if "provider" in cfg and str(cfg.get("provider") or "").strip():
         provider = str(cfg.get("provider")).strip().lower()
     else:
-        # Legacy pipelines had no provider field → OpenAI.
-        provider = TTS_PROVIDER_OPENAI
+        provider = DEFAULT_TTS_PROVIDER
     if provider not in TTS_PROVIDERS:
-        provider = TTS_PROVIDER_OPENAI
+        provider = DEFAULT_TTS_PROVIDER
+    # SpeechKit off for fairy-tale path — coerce to Sunor (Suno V5.5).
+    if provider == TTS_PROVIDER_SPEECHKIT:
+        provider = TTS_PROVIDER_SUNOR
     cfg["provider"] = provider
+
+    if provider == TTS_PROVIDER_SUNOR:
+        cfg["model"] = "suno"
+        cfg["voice"] = "sunor"
+        cfg["speed"] = 1.0
+        cfg["role"] = ""
+        cfg["response_format"] = "mp3"
+        cfg["instructions"] = ""
+        cfg["instructions_preset"] = "custom"
+        return cfg
 
     model = str(cfg.get("model") or "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
     if model in ("tts-1", "tts-1-hd"):
@@ -153,6 +213,13 @@ def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
             cfg["speed"] = max(0.1, min(float(cfg.get("speed", DEFAULT_SPEECHKIT_SPEED)), 3.0))
         except (TypeError, ValueError):
             cfg["speed"] = DEFAULT_SPEECHKIT_SPEED
+        try:
+            cfg["pitchShift"] = max(
+                -1000.0,
+                min(float(cfg.get("pitchShift", DEFAULT_SPEECHKIT_PITCH_SHIFT)), 1000.0),
+            )
+        except (TypeError, ValueError):
+            cfg["pitchShift"] = DEFAULT_SPEECHKIT_PITCH_SHIFT
         role = resolve_role(voice, str(cfg.get("role") or DEFAULT_SPEECHKIT_ROLE))
         cfg["role"] = role or DEFAULT_SPEECHKIT_ROLE
     else:
@@ -169,6 +236,14 @@ def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             cfg["speed"] = DEFAULT_OPENAI_SPEED
         cfg["role"] = str(cfg.get("role") or "").strip()
+        if "pitchShift" in cfg:
+            try:
+                cfg["pitchShift"] = max(
+                    -1000.0,
+                    min(float(cfg.get("pitchShift", DEFAULT_SPEECHKIT_PITCH_SHIFT)), 1000.0),
+                )
+            except (TypeError, ValueError):
+                cfg["pitchShift"] = DEFAULT_SPEECHKIT_PITCH_SHIFT
 
     preset = str(cfg.get("instructions_preset") or "").strip() or DEFAULT_TTS_INSTRUCTIONS_PRESET
     if preset not in TTS_INSTRUCTION_PRESETS and preset != "custom":
@@ -182,6 +257,42 @@ def _normalize_tts_gen_config(config: dict[str, Any]) -> dict[str, Any]:
         else:
             instructions = DEFAULT_TTS_INSTRUCTIONS
     cfg["instructions"] = instructions[:800]
+    return cfg
+
+
+def _normalize_sunor_gen_config(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = dict(config or {})
+    mode = str(cfg.get("music_mode") or "inspiration").strip().lower()
+    if mode not in ("inspiration", "custom", "instrumental"):
+        mode = "inspiration"
+    cfg["music_mode"] = mode
+    cfg["gpt_description_prompt"] = str(cfg.get("gpt_description_prompt") or "")[:3500]
+    cfg["prompt"] = str(cfg.get("prompt") or "")[:8000]
+    cfg["tags"] = str(cfg.get("tags") or "")[:1000]
+    cfg["negative_tags"] = str(cfg.get("negative_tags") or "")[:500]
+    cfg["title"] = str(cfg.get("title") or "")[:120]
+    vg = str(cfg.get("vocal_gender") or "").strip().lower()
+    cfg["vocal_gender"] = vg if vg in ("m", "f") else ""
+    cfg["make_instrumental"] = bool(cfg.get("make_instrumental", False))
+    cfg["lyrics_enabled"] = bool(cfg.get("lyrics_enabled", False))
+    cfg["lyrics_prompt"] = str(cfg.get("lyrics_prompt") or "")[:3500]
+    source = str(cfg.get("prompt_source") or "config").strip().lower()
+    cfg["prompt_source"] = source if source in ("config", "story_gen") else "config"
+    try:
+        target = int(cfg.get("target_duration_sec") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    cfg["target_duration_sec"] = max(0, min(600, target))
+    cfg["extend_enabled"] = bool(cfg.get("extend_enabled", False))
+    try:
+        continue_at = int(cfg.get("continue_at_sec") or 28)
+    except (TypeError, ValueError):
+        continue_at = 28
+    cfg["continue_at_sec"] = max(1, min(120, continue_at))
+    cfg["continue_prompt"] = str(cfg.get("continue_prompt") or "")[:4000]
+    pick = str(cfg.get("pick_variant") or "first").strip().lower()
+    cfg["pick_variant"] = pick if pick in ("first", "second", "first_ok") else "first"
+    cfg["attach_cover_image"] = bool(cfg.get("attach_cover_image", True))
     return cfg
 
 
@@ -219,6 +330,21 @@ def _normalize_slot_prompts(raw: Any, times: list[str]) -> dict[str, str]:
     return out
 
 
+def _normalize_slot_prompt_modes(raw: Any, slot_prompts: dict[str, str]) -> dict[str, str]:
+    if not isinstance(raw, dict) or not slot_prompts:
+        return {}
+    allowed = set(slot_prompts)
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        time_key = str(key).strip()
+        if time_key not in allowed:
+            continue
+        mode = str(value or "").strip().lower()
+        if mode == "append":
+            out[time_key] = "append"
+    return out
+
+
 def _normalize_schedule(raw: Any) -> dict[str, Any]:
     schedule = copy.deepcopy(raw or {"enabled": False, "frequency": "daily", "times": []})
     if not isinstance(schedule, dict):
@@ -233,9 +359,34 @@ def _normalize_schedule(raw: Any) -> dict[str, Any]:
     schedule["times"] = times
     schedule["per_slot_prompts"] = bool(schedule.get("per_slot_prompts", False))
     schedule["slot_prompts"] = _normalize_slot_prompts(schedule.get("slot_prompts"), times)
+    schedule["slot_prompt_modes"] = _normalize_slot_prompt_modes(
+        schedule.get("slot_prompt_modes"),
+        schedule["slot_prompts"],
+    )
+    schedule["slot_image_addons"] = _normalize_slot_prompts(
+        schedule.get("slot_image_addons"),
+        times,
+    )
     if not schedule["per_slot_prompts"]:
         schedule["slot_prompts"] = {}
+        schedule["slot_prompt_modes"] = {}
+        schedule["slot_image_addons"] = {}
     return schedule
+
+
+def mix_slot_brief(base: str, addon: str) -> str:
+    """Join general brief with a slot addon. Empty side is omitted."""
+    base_text = (base or "").strip()
+    addon_text = (addon or "").strip()
+    if not addon_text:
+        return base_text
+    if not base_text:
+        return addon_text
+    return (
+        f"{base_text}\n\n"
+        f"Дополнительно для этого слота (важнее общего брифа, если есть конфликт):\n"
+        f"{addon_text}"
+    )
 
 
 def resolve_post_brief(
@@ -246,12 +397,45 @@ def resolve_post_brief(
     """Pick slot-specific brief when enabled, else fall back to post_gen.user_input."""
     schedule = schedule or {}
     post_cfg = post_cfg or {}
+    base = str(post_cfg.get("user_input") or "").strip()
     if schedule.get("per_slot_prompts") and slot_time:
         prompts = schedule.get("slot_prompts") or {}
         slot_brief = str(prompts.get(slot_time) or "").strip()
         if slot_brief:
+            modes = schedule.get("slot_prompt_modes") or {}
+            mode = str(modes.get(slot_time) or "").strip().lower()
+            if mode == "append":
+                return mix_slot_brief(base, slot_brief)
             return slot_brief
-    return str(post_cfg.get("user_input") or "").strip()
+    return base
+
+
+def resolve_slot_image_addon(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None = None,
+) -> str:
+    """Return per-slot image extra, or empty if unused."""
+    schedule = schedule or {}
+    if not (schedule.get("per_slot_prompts") and slot_time):
+        return ""
+    addons = schedule.get("slot_image_addons") or {}
+    return str(addons.get(slot_time) or "").strip()
+
+
+def mix_slot_image_addon(prompt: str, addon: str) -> str:
+    """Append a slot image extra to an already built image prompt."""
+    base = (prompt or "").strip()
+    extra = (addon or "").strip()
+    if not extra:
+        return base
+    if not base:
+        return extra
+    return (
+        f"{base}\n\n"
+        f"Дополнительно для картинки этого слота "
+        f"(важнее общей инструкции, если есть конфликт):\n"
+        f"{extra}"
+    )
 
 
 def _migrate_story_topic_queue_into_post(steps: list[dict[str, Any]]) -> None:
@@ -301,6 +485,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
                 cfg = _normalize_story_gen_config(cfg)
             elif step_type == "tts_gen":
                 cfg = _normalize_tts_gen_config(cfg)
+            elif step_type == "sunor_gen":
+                cfg = _normalize_sunor_gen_config(cfg)
             steps.append(
                 {
                     "id": step.get("id") or _new_step_id(),
@@ -312,7 +498,14 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
         _migrate_story_topic_queue_into_post(steps)
         schedule = _normalize_schedule(raw.get("schedule"))
         news_rss = normalize_news_rss(raw.get("news_rss"))
-        return {"version": 2, "steps": steps, "schedule": schedule, "news_rss": news_rss}
+        drive_video = normalize_drive_video(raw.get("drive_video"))
+        return {
+            "version": 2,
+            "steps": steps,
+            "schedule": schedule,
+            "news_rss": news_rss,
+            "drive_video": drive_video,
+        }
 
     if not isinstance(raw, dict):
         raw = {}
@@ -327,6 +520,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
             config = _normalize_story_gen_config(config)
         elif block_type == "tts_gen":
             config = _normalize_tts_gen_config(config)
+        elif block_type == "sunor_gen":
+            config = _normalize_sunor_gen_config(config)
         steps.append(
             {
                 "id": _new_step_id(),
@@ -346,7 +541,17 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
     news_enabled, news_cfg = _split_block_dict("news_rss", news_raw)
     news_rss = normalize_news_rss({"enabled": news_enabled, **news_cfg})
 
-    return {"version": 2, "steps": steps, "schedule": schedule, "news_rss": news_rss}
+    drive_raw = raw.get("drive_video") or dict(DEFAULT_DRIVE_VIDEO)
+    drive_enabled, drive_cfg = _split_block_dict("drive_video", drive_raw)
+    drive_video = normalize_drive_video({"enabled": drive_enabled, **drive_cfg})
+
+    return {
+        "version": 2,
+        "steps": steps,
+        "schedule": schedule,
+        "news_rss": news_rss,
+        "drive_video": drive_video,
+    }
 
 
 def steps_to_ui_dict(config: Any) -> dict[str, Any]:
@@ -361,8 +566,11 @@ def steps_to_ui_dict(config: Any) -> dict[str, Any]:
         "times": list(sched.get("times") or []),
         "per_slot_prompts": bool(sched.get("per_slot_prompts", False)),
         "slot_prompts": dict(sched.get("slot_prompts") or {}),
+        "slot_prompt_modes": dict(sched.get("slot_prompt_modes") or {}),
+        "slot_image_addons": dict(sched.get("slot_image_addons") or {}),
     }
     ui["news_rss"] = normalize_news_rss(v2.get("news_rss"))
+    ui["drive_video"] = normalize_drive_video(v2.get("drive_video"))
     return ui
 
 

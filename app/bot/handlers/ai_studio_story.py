@@ -151,14 +151,21 @@ async def handle_story_callback(
         await fsm.set_block_data(
             max_user_id,
             "tts_gen",
-            {"response_format": "mp3", "enabled": True},
+            {
+                "provider": "sunor",
+                "model": "suno",
+                "voice": "sunor",
+                "speed": 1.0,
+                "response_format": "mp3",
+                "enabled": True,
+            },
         )
         await redis.delete(f"ai_story_gen_review:{max_user_id}")
         state = await fsm.get_state(max_user_id)
         await sync_active_pipeline(session, state)
         await max_client.send_message_to_user(
             user_id=max_user_id,
-            text="✅ Аудио настроено (сказка + озвучка).",
+            text="✅ Видео-сказка настроена (Sunor V5.5 · 3–6 лет).",
         )
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
@@ -182,14 +189,17 @@ async def handle_story_callback(
             else None
         )
         block = (st or {}).get("blocks", {}).get("story_gen", {})
-        caption, story = await generate_fairy_tale(
-            openai_client,
-            brief=review.get("input") or "",
-            channel_title=(channel.title if channel else "") or "",
-            target_minutes=int(block.get("target_minutes") or 5),
-            age_range=str(block.get("age_range") or "3-6"),
-            story_format=str(block.get("format") or "fairy_tale"),
-        )
+        from app.application.admin.billing_context import billing_user
+
+        with billing_user(channel.owner_id if channel else None):
+            caption, story = await generate_fairy_tale(
+                openai_client,
+                brief=review.get("input") or "",
+                channel_title=(channel.title if channel else "") or "",
+                target_minutes=int(block.get("target_minutes") or 5),
+                age_range=str(block.get("age_range") or "3-6"),
+                story_format=str(block.get("format") or "fairy_tale"),
+            )
         review["caption"] = caption
         review["story"] = story
         await redis.setex(

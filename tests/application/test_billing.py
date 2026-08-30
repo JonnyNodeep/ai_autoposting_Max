@@ -16,6 +16,7 @@ from app.application.billing.pricing import (
 from app.application.billing.quota import (
     QuotaDenied,
     consume_generation,
+    maybe_consume_generation,
     subscription_allows_publish,
 )
 from app.domain.entities.payment import Payment, PaymentKind, PaymentStatus
@@ -144,9 +145,73 @@ async def test_consume_generation_increments():
         generations_used=2,
     )
     repo = AsyncMock()
+    repo.try_consume_generation = AsyncMock(return_value=3)
     updated = await consume_generation(repo, sub)
     assert updated.generations_used == 3
-    assert repo.update.called
+    repo.try_consume_generation.assert_awaited_once_with(1)
+    repo.update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_consume_generation_atomic_failure():
+    sub = Subscription(
+        id=1,
+        user_id=1,
+        status=SubscriptionStatus.ACTIVE,
+        generations_quota=30,
+        generations_used=30,
+    )
+    repo = AsyncMock()
+    repo.try_consume_generation = AsyncMock(return_value=None)
+    updated = await consume_generation(repo, sub)
+    assert updated.generations_used == 30
+
+
+@pytest.mark.asyncio
+async def test_maybe_consume_skips_without_published(monkeypatch):
+    from app.application.billing.quota import maybe_consume_generation
+
+    monkeypatch.setattr(
+        "app.application.billing.quota.settings.app.consume_quota_only_on_publish",
+        True,
+    )
+    sub = Subscription(
+        id=1,
+        user_id=1,
+        status=SubscriptionStatus.ACTIVE,
+        generations_quota=30,
+        generations_used=2,
+    )
+    repo = AsyncMock()
+    repo.try_consume_generation = AsyncMock(return_value=3)
+    updated = await maybe_consume_generation(
+        repo, sub, {"publish_skipped": "topic_dedup"}, run_id=99
+    )
+    assert updated.generations_used == 2
+    repo.try_consume_generation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_maybe_consume_when_published(monkeypatch):
+    from app.application.billing.quota import maybe_consume_generation
+
+    monkeypatch.setattr(
+        "app.application.billing.quota.settings.app.consume_quota_only_on_publish",
+        True,
+    )
+    sub = Subscription(
+        id=1,
+        user_id=1,
+        status=SubscriptionStatus.ACTIVE,
+        generations_quota=30,
+        generations_used=2,
+    )
+    repo = AsyncMock()
+    repo.try_consume_generation = AsyncMock(return_value=3)
+    updated = await maybe_consume_generation(
+        repo, sub, {"published": True}, run_id=99
+    )
+    assert updated.generations_used == 3
 
 
 @pytest.mark.asyncio

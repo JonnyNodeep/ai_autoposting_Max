@@ -264,16 +264,20 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         post_block = (st or {}).get("blocks", {}).get("post_gen", {})
         chat_id = channel.max_chat_id if channel else None
         recent_topics = await fetch_recent_post_topics(max_client, chat_id)
+        from app.application.admin.billing_context import billing_user
+
+        owner_id = channel.owner_id if channel else None
         try:
-            generated_post, _topic = await generate_post_text(
-                openai_client,
-                review["input"],
-                ch_title,
-                bold_headings=bool(post_block.get("bold_headings", True)),
-                use_emoji=bool(post_block.get("use_emoji", True)),
-                comments_enabled=bool(post_block.get("comments_enabled", False)),
-                recent_topics=recent_topics,
-            )
+            with billing_user(owner_id):
+                generated_post, _topic = await generate_post_text(
+                    openai_client,
+                    review["input"],
+                    ch_title,
+                    bold_headings=bool(post_block.get("bold_headings", True)),
+                    use_emoji=bool(post_block.get("use_emoji", True)),
+                    comments_enabled=bool(post_block.get("comments_enabled", False)),
+                    recent_topics=recent_topics,
+                )
         except TopicDedupExhausted as e:
             await max_client.send_message_to_user(
                 user_id=max_user_id,
@@ -383,16 +387,19 @@ async def handle_post_message(max_user_id: int, message_text: str, redis) -> boo
 
             chat_id = channel.max_chat_id if channel else None
             recent_topics = await fetch_recent_post_topics(max_client, chat_id)
+            from app.application.admin.billing_context import billing_user
+
             try:
-                generated_post, _topic = await generate_post_text(
-                    openai_client,
-                    message_text,
-                    ch_title,
-                    bold_headings=bool(post_block.get("bold_headings", True)),
-                    use_emoji=bool(post_block.get("use_emoji", True)),
-                    comments_enabled=bool(post_block.get("comments_enabled", False)),
-                    recent_topics=recent_topics,
-                )
+                with billing_user(channel.owner_id if channel else None):
+                    generated_post, _topic = await generate_post_text(
+                        openai_client,
+                        message_text,
+                        ch_title,
+                        bold_headings=bool(post_block.get("bold_headings", True)),
+                        use_emoji=bool(post_block.get("use_emoji", True)),
+                        comments_enabled=bool(post_block.get("comments_enabled", False)),
+                        recent_topics=recent_topics,
+                    )
             except TopicDedupExhausted as e:
                 await max_client.send_message_to_user(
                     user_id=max_user_id,

@@ -8,6 +8,7 @@ from app.infrastructure.repositories.channel_repository import SQLAlchemyChannel
 from app.infrastructure.repositories.user_repository import SQLAlchemyUserRepository
 from app.infrastructure.services.max_client import MaxAPIHTTPClient
 
+from app.bot.handlers.ai_studio_drive import handle_drive_callback, handle_drive_message
 from app.bot.handlers.ai_studio_entry import handle_entry_callback
 from app.bot.handlers.ai_studio_image import handle_image_callback, handle_image_message
 from app.bot.handlers.ai_studio_pipeline import handle_pipeline_callback
@@ -15,11 +16,18 @@ from app.bot.handlers.ai_studio_post import handle_post_callback, handle_post_me
 from app.bot.handlers.ai_studio_rss import handle_rss_callback, handle_rss_message
 from app.bot.handlers.ai_studio_schedule import handle_schedule_callback, handle_schedule_message
 from app.bot.handlers.ai_studio_story import handle_story_callback, handle_story_message
+from app.bot.handlers.ai_studio_sunor import handle_sunor_callback, handle_sunor_message
 from app.bot.handlers.ai_studio_topic_queue import (
+    handle_topic_count_message,
+    handle_topic_gen_extra_message,
     handle_topic_queue_callback,
     handle_topic_queue_message,
 )
-from app.bot.handlers.ai_studio_tts import handle_tts_callback, handle_tts_instructions_message
+from app.bot.handlers.ai_studio_tts import (
+    handle_tts_callback,
+    handle_tts_instructions_message,
+    handle_tts_pitch_message,
+)
 from app.bot.handlers.ai_studio_video import handle_video_callback, handle_video_message
 
 
@@ -75,6 +83,8 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
                 if await handle_tts_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
+                if await handle_sunor_callback(callback_data, max_user_id, max_client, channel_repo, session):
+                    return
                 if await handle_post_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
                 if await handle_topic_queue_callback(
@@ -84,6 +94,8 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                 if await handle_schedule_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
                 if await handle_rss_callback(callback_data, max_user_id, max_client, channel_repo, session):
+                    return
+                if await handle_drive_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
                 if await handle_pipeline_callback(
                     callback_data,
@@ -135,14 +147,24 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
             return True
         if await handle_tts_instructions_message(max_user_id, message_text, redis):
             return True
+        if await handle_tts_pitch_message(max_user_id, message_text, redis):
+            return True
         if await handle_story_message(max_user_id, message_text, redis):
             return True
+        if await handle_sunor_message(max_user_id, message_text, redis):
+            return True
         if await handle_post_message(max_user_id, message_text, redis):
+            return True
+        if await handle_topic_count_message(max_user_id, message_text, redis):
+            return True
+        if await handle_topic_gen_extra_message(max_user_id, message_text, redis):
             return True
         if await handle_topic_queue_message(max_user_id, message_text, redis):
             return True
         if await handle_schedule_message(max_user_id, message_text, redis):
             return True
         if await handle_rss_message(max_user_id, message_text, redis):
+            return True
+        if await handle_drive_message(max_user_id, message_text, redis):
             return True
         return False

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.application.pipeline.blocks.drive_video import DriveVideoBlock
 from app.application.pipeline.blocks.image_gen import ImageGenBlock
 from app.application.pipeline.blocks.image_prompt import ImagePromptBlock
 from app.application.pipeline.blocks.post_gen import PostGenBlock
 from app.application.pipeline.blocks.story_gen import StoryGenBlock
+from app.application.pipeline.blocks.sunor_gen import SunorGenBlock
 from app.application.pipeline.blocks.tts_gen import TtsGenBlock
 from app.application.pipeline.blocks.video_gen import VideoGenBlock
 
@@ -34,6 +36,8 @@ def build_default_registry() -> BlockRegistry:
     registry.register(ImageGenBlock())
     registry.register(VideoGenBlock())
     registry.register(TtsGenBlock())
+    registry.register(SunorGenBlock())
+    registry.register(DriveVideoBlock())
     registry.register(PostGenBlock())
     return registry
 

@@ -4,8 +4,11 @@ from pathlib import Path
 import pytest
 
 from app.application.pipeline.normalize import (
+    mix_slot_brief,
+    mix_slot_image_addon,
     normalize_blocks_config,
     resolve_post_brief,
+    resolve_slot_image_addon,
     steps_to_ui_dict,
     ui_dict_to_v2,
     is_v2,
@@ -34,6 +37,8 @@ def test_normalize_legacy_dict_to_v2():
     assert v2["schedule"]["enabled"] is False
     assert v2["schedule"]["per_slot_prompts"] is False
     assert v2["schedule"]["slot_prompts"] == {}
+    assert v2["schedule"]["slot_prompt_modes"] == {}
+    assert v2["schedule"]["slot_image_addons"] == {}
     assert "news_rss" in v2
     assert v2["news_rss"]["enabled"] is False
     assert is_v2(v2)
@@ -97,6 +102,8 @@ def test_ui_roundtrip_preserves_fields():
     assert back["schedule"]["times"] == ["05:00", "10:00"]
     assert back["schedule"]["per_slot_prompts"] is True
     assert back["schedule"]["slot_prompts"] == {"05:00": "Гороскоп на день"}
+    assert back["schedule"]["slot_prompt_modes"] == {}
+    assert back["schedule"]["slot_image_addons"] == {}
     assert back["image_gen"]["model"] == "gpt-image-2"
     assert back["image_gen"]["add_watermark"] is False
     assert back["image_gen"]["allow_text"] is False
@@ -117,6 +124,8 @@ def test_normalize_schedule_migrates_legacy_times():
     )
     assert v2["schedule"]["per_slot_prompts"] is False
     assert v2["schedule"]["slot_prompts"] == {}
+    assert v2["schedule"]["slot_prompt_modes"] == {}
+    assert v2["schedule"]["slot_image_addons"] == {}
     assert v2["schedule"]["times"] == ["05:00", "12:00"]
 
 
@@ -139,6 +148,129 @@ def test_normalize_schedule_drops_unknown_slot_prompts_and_empty():
         }
     )
     assert v2["schedule"]["slot_prompts"] == {"05:00": "утро"}
+    assert v2["schedule"]["slot_prompt_modes"] == {}
+
+
+def test_normalize_schedule_keeps_append_modes_and_drops_junk():
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {
+                    "05:00": "утром без рекламы",
+                    "12:00": "Гороскоп",
+                },
+                "slot_prompt_modes": {
+                    "05:00": "append",
+                    "12:00": "replace",
+                    "18:00": "append",
+                    "99:00": "append",
+                },
+            },
+        }
+    )
+    assert v2["schedule"]["slot_prompts"] == {
+        "05:00": "утром без рекламы",
+        "12:00": "Гороскоп",
+    }
+    assert v2["schedule"]["slot_prompt_modes"] == {"05:00": "append"}
+
+
+def test_normalize_schedule_drops_modes_when_per_slot_disabled():
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [],
+            "schedule": {
+                "enabled": True,
+                "frequency": "daily",
+                "times": ["05:00"],
+                "per_slot_prompts": False,
+                "slot_prompts": {"05:00": "X"},
+                "slot_prompt_modes": {"05:00": "append"},
+                "slot_image_addons": {"05:00": "на картинке котики"},
+            },
+        }
+    )
+    assert v2["schedule"]["slot_prompts"] == {}
+    assert v2["schedule"]["slot_prompt_modes"] == {}
+    assert v2["schedule"]["slot_image_addons"] == {}
+
+
+def test_ui_roundtrip_preserves_slot_prompt_modes():
+    ui = {
+        "post_gen": {
+            "enabled": True,
+            "mode": "ai",
+            "user_input": "общий бриф",
+        },
+        "schedule": {
+            "enabled": True,
+            "frequency": "2x_day",
+            "times": ["05:00", "12:00"],
+            "per_slot_prompts": True,
+            "slot_prompts": {
+                "05:00": "утром без рекламы",
+                "12:00": "Гороскоп",
+            },
+            "slot_prompt_modes": {
+                "05:00": "append",
+                "12:00": "replace",
+            },
+        },
+    }
+    back = steps_to_ui_dict(ui_dict_to_v2(ui))
+    assert back["schedule"]["slot_prompts"] == {
+        "05:00": "утром без рекламы",
+        "12:00": "Гороскоп",
+    }
+    assert back["schedule"]["slot_prompt_modes"] == {"05:00": "append"}
+
+
+def test_normalize_schedule_keeps_image_addons_without_slot_prompt():
+    v2 = normalize_blocks_config(
+        {
+            "version": 2,
+            "steps": [],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {},
+                "slot_image_addons": {
+                    "05:00": "  на картинке котики  ",
+                    "12:00": "",
+                    "99:00": "лишний",
+                },
+            },
+        }
+    )
+    assert v2["schedule"]["per_slot_prompts"] is True
+    assert v2["schedule"]["slot_prompts"] == {}
+    assert v2["schedule"]["slot_image_addons"] == {"05:00": "на картинке котики"}
+
+
+def test_ui_roundtrip_preserves_slot_image_addons():
+    ui = {
+        "post_gen": {"enabled": True, "mode": "ai", "user_input": "общий бриф"},
+        "schedule": {
+            "enabled": True,
+            "frequency": "2x_day",
+            "times": ["05:00", "12:00"],
+            "per_slot_prompts": True,
+            "slot_prompts": {},
+            "slot_image_addons": {"05:00": "на картинке котики"},
+        },
+    }
+    back = steps_to_ui_dict(ui_dict_to_v2(ui))
+    assert back["schedule"]["slot_prompts"] == {}
+    assert back["schedule"]["slot_image_addons"] == {"05:00": "на картинке котики"}
 
 
 def test_resolve_post_brief_fallback_and_slot():
@@ -151,6 +283,52 @@ def test_resolve_post_brief_fallback_and_slot():
     assert resolve_post_brief(schedule, post, "12:00") == "Общий бриф"
     assert resolve_post_brief({"per_slot_prompts": False, "slot_prompts": {"05:00": "X"}}, post, "05:00") == "Общий бриф"
     assert resolve_post_brief(None, post, "05:00") == "Общий бриф"
+
+
+def test_mix_slot_brief_joins_or_falls_back():
+    mixed = mix_slot_brief("Общий бриф", "утром без рекламы")
+    assert mixed.startswith("Общий бриф")
+    assert "утром без рекламы" in mixed
+    assert "важнее общего брифа" in mixed
+    assert mix_slot_brief("Общий бриф", "  ") == "Общий бриф"
+    assert mix_slot_brief("", "только слот") == "только слот"
+    assert mix_slot_brief("  ", "  ") == ""
+
+
+def test_mix_and_resolve_slot_image_addon():
+    mixed = mix_slot_image_addon("тема поста", "на картинке котики")
+    assert mixed.startswith("тема поста")
+    assert "на картинке котики" in mixed
+    assert "важнее общей инструкции" in mixed
+    assert mix_slot_image_addon("тема", "  ") == "тема"
+    assert mix_slot_image_addon("", "котики") == "котики"
+
+    schedule = {
+        "per_slot_prompts": True,
+        "slot_image_addons": {"05:00": "на картинке котики"},
+    }
+    assert resolve_slot_image_addon(schedule, "05:00") == "на картинке котики"
+    assert resolve_slot_image_addon(schedule, "12:00") == ""
+    assert resolve_slot_image_addon({"per_slot_prompts": False, "slot_image_addons": {"05:00": "X"}}, "05:00") == ""
+    assert resolve_slot_image_addon(None, "05:00") == ""
+
+
+def test_resolve_post_brief_append_mixes_general():
+    schedule = {
+        "per_slot_prompts": True,
+        "slot_prompts": {"05:00": "утром без рекламы"},
+        "slot_prompt_modes": {"05:00": "append"},
+    }
+    post = {"user_input": "Общий бриф"}
+    mixed = resolve_post_brief(schedule, post, "05:00")
+    assert "Общий бриф" in mixed
+    assert "утром без рекламы" in mixed
+    assert resolve_post_brief(schedule, post, "12:00") == "Общий бриф"
+    assert resolve_post_brief(
+        {**schedule, "slot_prompts": {"05:00": ""}},
+        post,
+        "05:00",
+    ) == "Общий бриф"
 
 
 @pytest.mark.asyncio
@@ -212,6 +390,70 @@ async def test_post_gen_uses_slot_prompt_when_enabled():
     assert len(oai.prompts) == 1
     assert "Гороскоп на сегодня" in oai.prompts[0]
     assert "Общий дневной контент" not in oai.prompts[0]
+    assert ctx.post_text == "Готовый пост"
+
+
+@pytest.mark.asyncio
+async def test_post_gen_appends_slot_addon_to_general_brief():
+    class _OAI:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def generate_text(self, prompt: str, system_prompt: str = "") -> str:
+            self.prompts.append(prompt)
+            return "Готовый пост"
+
+    class _Max:
+        async def get_messages(self, chat_id, count=50):
+            return []
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            return None
+
+    class _Channel:
+        max_chat_id = 1
+
+    oai = _OAI()
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=4,
+        max_client=_Max(),
+        openai_client=oai,
+        target="channel",
+        channel_title="Астро",
+        meta={"slot_time": "05:00"},
+    )
+    await PipelineRunner().run(
+        ctx,
+        {
+            "version": 2,
+            "steps": [
+                {
+                    "id": "1",
+                    "type": "post_gen",
+                    "enabled": True,
+                    "config": {
+                        "mode": "ai",
+                        "user_input": "Общий дневной контент",
+                        "add_channel_link": False,
+                    },
+                },
+            ],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {"05:00": "утром без рекламы"},
+                "slot_prompt_modes": {"05:00": "append"},
+            },
+        },
+    )
+    joined = "\n".join(oai.prompts)
+    assert oai.prompts
+    assert "Общий дневной контент" in joined
+    assert "утром без рекламы" in joined
     assert ctx.post_text == "Готовый пост"
 
 
@@ -471,6 +713,70 @@ async def test_image_prompt_from_topic_uses_meta_topic_not_full_post():
 
 
 @pytest.mark.asyncio
+async def test_image_prompt_from_topic_mixes_slot_image_addon():
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=74,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        post_text="🌷 Пионы в вазе\n\nДлинный текст про уход.",
+        meta={
+            "post_topic": "Пионы в вазе",
+            "slot_time": "05:00",
+            "pipeline_schedule": {
+                "per_slot_prompts": True,
+                "slot_image_addons": {"05:00": "на картинке котики"},
+            },
+        },
+    )
+    await ImagePromptBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "from_topic",
+            "instruction": "Сгенерируй картинку по этой теме",
+            "use_visual_style": False,
+        },
+    )
+    assert "Пионы в вазе" in ctx.image_prompt
+    assert "на картинке котики" in ctx.image_prompt
+    assert "Длинный текст про уход" not in ctx.image_prompt
+
+
+@pytest.mark.asyncio
+async def test_image_prompt_from_topic_ignores_addon_without_slot_time():
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=75,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        post_text="Пионы в вазе",
+        meta={
+            "post_topic": "Пионы в вазе",
+            "pipeline_schedule": {
+                "per_slot_prompts": True,
+                "slot_image_addons": {"05:00": "на картинке котики"},
+            },
+        },
+    )
+    await ImagePromptBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "mode": "from_topic",
+            "instruction": "Сгенерируй картинку по этой теме",
+            "use_visual_style": False,
+        },
+    )
+    assert "Пионы в вазе" in ctx.image_prompt
+    assert "котики" not in ctx.image_prompt
+
+
+@pytest.mark.asyncio
 async def test_image_prompt_from_topic_fallback_first_line():
     ctx = PipelineContext(
         channel=None,
@@ -548,6 +854,71 @@ async def test_image_prompt_from_topic_via_runner_seeded_post():
     assert "Салат с киноа и авокадо" in ctx.image_prompt
     assert "Ингредиенты и шаги" not in ctx.image_prompt
     assert ctx.image_url.startswith("img:")
+
+
+@pytest.mark.asyncio
+async def test_runner_from_topic_uses_slot_image_addon_not_post_brief():
+    class GenBlock:
+        type_id = "image_gen"
+
+        async def execute(self, ctx, config):
+            if ctx.image_prompt:
+                ctx.image_url = f"img:{ctx.image_prompt[:40]}"
+
+    registry = BlockRegistry()
+    registry.register(ImagePromptBlock())
+    registry.register(GenBlock())
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=76,
+        max_client=None,
+        openai_client=None,
+        target="channel",
+        meta={"slot_time": "05:00"},
+    )
+    await PipelineRunner(registry).run(
+        ctx,
+        {
+            "version": 2,
+            "steps": [
+                {
+                    "id": "1",
+                    "type": "image_prompt",
+                    "enabled": True,
+                    "config": {
+                        "mode": "from_topic",
+                        "instruction": "Сгенерируй картинку по этой теме",
+                        "use_visual_style": False,
+                    },
+                },
+                {"id": "2", "type": "image_gen", "enabled": True, "config": {}},
+                {
+                    "id": "3",
+                    "type": "post_gen",
+                    "enabled": True,
+                    "config": {
+                        "mode": "fixed",
+                        "user_input": "Общий бриф без животных",
+                        "generated_post": "Салат с киноа и авокадо\n\nИнгредиенты и шаги приготовления.",
+                    },
+                },
+            ],
+            "schedule": {
+                "enabled": True,
+                "frequency": "2x_day",
+                "times": ["05:00", "12:00"],
+                "per_slot_prompts": True,
+                "slot_prompts": {},
+                "slot_image_addons": {"05:00": "на картинке котики"},
+            },
+        },
+    )
+    assert "Салат с киноа и авокадо" in ctx.image_prompt
+    assert "на картинке котики" in ctx.image_prompt
+    assert "Общий бриф без животных" not in ctx.image_prompt
+    assert "котики" not in (ctx.post_text or "")
 
 
 @pytest.mark.asyncio
@@ -1174,25 +1545,32 @@ async def test_tts_gen_writes_audio_path():
 
 
 @pytest.mark.asyncio
-async def test_story_gen_sets_caption_and_script():
+async def test_story_gen_sets_caption_and_script(monkeypatch):
     from app.application.pipeline.blocks.story_gen import StoryGenBlock
+    from app.application.pipeline.tale_video import TaleScene, TaleScript
 
-    class _OAI:
-        async def generate_text(self, prompt, system_prompt=None):
-            return json.dumps(
-                {
-                    "caption": "🌙 Сказка про Тима",
-                    "story": "Жил-был ёжик Тим. " * 20,
-                },
-                ensure_ascii=False,
-            )
+    async def _fake_script(*, topic, **kwargs):
+        return TaleScript(
+            title="Тим",
+            caption="🌙 Сказка про Тима",
+            story="Жил-был ёжик Тим. " * 20,
+            scenes=[
+                TaleScene(id=i, story_span=f"s{i}", image_prompt_en="p")
+                for i in range(1, 7)
+            ],
+        )
+
+    monkeypatch.setattr(
+        "app.application.pipeline.tale_video.generate_tale_script",
+        _fake_script,
+    )
 
     ctx = PipelineContext(
         channel=None,
         channel_link="",
         run_id=1,
         max_client=None,
-        openai_client=_OAI(),
+        openai_client=None,
         target="user",
         channel_title="Аудиосказки",
     )
@@ -1203,16 +1581,17 @@ async def test_story_gen_sets_caption_and_script():
             "mode": "ai",
             "user_input": "добрые сказки",
             "target_minutes": 5,
+            "format": "fairy_tale",
         },
     )
     assert ctx.post_text.startswith("🌙")
     assert "ёжик" in ctx.story_script
+    assert ctx.meta.get("tale_script")
 
 
 @pytest.mark.asyncio
 async def test_story_gen_recovers_from_broken_json_without_leak():
     from app.application.pipeline.blocks.story_gen import (
-        StoryGenBlock,
         _clean_caption,
         _clean_story,
         _extract_json_object,
@@ -1229,32 +1608,6 @@ async def test_story_gen_recovers_from_broken_json_without_leak():
     assert not caption.startswith("{")
     assert "caption" not in caption[:20]
     assert "ёжик" in story.lower() or "Ёжик" in (caption + story)
-
-    class _OAI:
-        async def generate_text(self, prompt, system_prompt=None):
-            return broken
-
-    ctx = PipelineContext(
-        channel=None,
-        channel_link="",
-        run_id=1,
-        max_client=None,
-        openai_client=_OAI(),
-        target="user",
-        channel_title="Аудиосказки",
-    )
-    await StoryGenBlock().execute(
-        ctx,
-        {
-            "enabled": True,
-            "mode": "ai",
-            "user_input": "добрые сказки",
-            "target_minutes": 5,
-        },
-    )
-    assert ctx.story_script
-    assert not (ctx.post_text or "").strip().startswith("{")
-    assert '{"caption"' not in (ctx.post_text or "")
 
 
 def test_build_share_cta_audio():

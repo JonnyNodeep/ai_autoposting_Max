@@ -20,6 +20,8 @@ class AnalyzeStyleUseCase:
         self._openai = openai_client
 
     async def execute(self, channel_id: int) -> StyleProfile:
+        from app.application.admin.billing_context import billing_user
+
         channel = await self._channel_repo.get_by_id(channel_id)
         if not channel:
             raise ValueError(f"Channel {channel_id} not found")
@@ -30,7 +32,8 @@ class AnalyzeStyleUseCase:
             sample_posts=channel.sample_posts,
         )
 
-        response = await self._openai.generate_text(prompt=user, system_prompt=system)
+        with billing_user(channel.owner_id):
+            response = await self._openai.generate_text(prompt=user, system_prompt=system)
         try:
             data = json.loads(response)
             profile = StyleProfile.from_dict(data)
@@ -58,6 +61,8 @@ class GenerateDescriptionUseCase:
         self._openai = openai_client
 
     async def execute(self, channel_id: int) -> str:
+        from app.application.admin.billing_context import billing_user
+
         channel = await self._channel_repo.get_by_id(channel_id)
         if not channel:
             raise ValueError(f"Channel {channel_id} not found")
@@ -68,7 +73,8 @@ class GenerateDescriptionUseCase:
             style_profile=channel.style_profile.to_dict(),
         )
 
-        description = await self._openai.generate_text(prompt=user, system_prompt=system)
+        with billing_user(channel.owner_id):
+            description = await self._openai.generate_text(prompt=user, system_prompt=system)
         channel.description = description.strip()
         await self._channel_repo.update(channel)
 
@@ -88,6 +94,7 @@ class GenerateLogoUseCase:
         self._max_client = max_client
 
     async def execute(self, channel_id: int) -> str:
+        from app.application.admin.billing_context import billing_user
         from app.application.channels.watermark_logo import save_watermark_logo
 
         channel = await self._channel_repo.get_by_id(channel_id)
@@ -100,7 +107,8 @@ class GenerateLogoUseCase:
             style_profile=channel.style_profile.to_dict(),
         )
 
-        result = await self._openai.generate_image(prompt)
+        with billing_user(channel.owner_id):
+            result = await self._openai.generate_image(prompt)
 
         if not result:
             logger.error(f"Logo generation returned empty result for channel {channel_id}")
@@ -162,7 +170,10 @@ class AnalyzeVisualStyleUseCase:
             "Это описание будет использоваться для генерации похожих изображений."
         )
 
-        visual_style = await self._openai.analyze_vision(prompt, base64_images)
+        from app.application.admin.billing_context import billing_user
+
+        with billing_user(channel.owner_id):
+            visual_style = await self._openai.analyze_vision(prompt, base64_images)
 
         channel.style_profile.visual_style = visual_style.strip()
         await self._channel_repo.update(channel)

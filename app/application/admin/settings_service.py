@@ -14,6 +14,8 @@ KEY_BILLING_PRICES = "billing_prices"
 KEY_RSS_WHITELIST = "feature_rss_whitelist"
 KEY_VIDEO_WHITELIST = "feature_video_whitelist"
 KEY_AUDIO_WHITELIST = "feature_audio_whitelist"
+KEY_DRIVE_WHITELIST = "feature_drive_whitelist"
+KEY_HIGH_FREQ_WHITELIST = "feature_high_freq_whitelist"
 
 DEFAULT_BILLING_PRICES: dict[str, Any] = {
     "base": {"solo": 490, "creator": 1990, "studio": 3490},

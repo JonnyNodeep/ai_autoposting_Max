@@ -60,6 +60,17 @@ class SQLARssSeenRepository:
                 titles.add(title)
         return guids, urls, titles
 
+    async def last_published_at(self, channel_id: int) -> datetime | None:
+        stmt = (
+            select(func.max(RssSeenItemModel.processed_at))
+            .where(
+                RssSeenItemModel.channel_id == channel_id,
+                RssSeenItemModel.pipeline_run_id.is_not(None),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def count_published_since(self, channel_id: int, since: datetime) -> int:
         stmt = select(func.count()).select_from(RssSeenItemModel).where(
             RssSeenItemModel.channel_id == channel_id,

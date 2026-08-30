@@ -25,7 +25,9 @@ class CreateChannelUseCase:
         existing = await self._channel_repo.get_by_max_chat_id(max_chat_id)
         if existing:
             if not existing.is_active:
+                await self._ensure_owner_can_add_channel(owner_id)
                 existing.is_active = True
+                existing.owner_id = owner_id
                 chat_info = await self._max_client.get_chat(max_chat_id)
                 existing.title = chat_info.get("title", existing.title)
                 existing.channel_link = chat_info.get("link", existing.channel_link)
@@ -33,26 +35,14 @@ class CreateChannelUseCase:
                 existing.content_frequency = None
                 existing.sample_posts = []
                 await self._channel_repo.update(existing)
-                logger.info(f"Channel reactivated: max_chat_id={max_chat_id} title={existing.title}")
+                logger.info(
+                    f"Channel reactivated: max_chat_id={max_chat_id} title={existing.title} "
+                    f"owner_id={owner_id}"
+                )
                 return existing
             raise ValueError(f"Channel max_chat_id={max_chat_id} already registered")
 
-        subscription = await self._subscription_repo.get_active_by_user(owner_id)
-        if not subscription:
-            raise ValueError("No active subscription")
-
-        admin_bypass = False
-        if self._user_repo is not None:
-            owner = await self._user_repo.get_by_id(owner_id)
-            admin_bypass = bool(owner and is_admin_max_user(owner.max_user_id))
-
-        if not admin_bypass:
-            current_count = await self._channel_repo.count_by_owner(owner_id)
-            if current_count >= subscription.channels_limit:
-                raise ValueError(
-                    f"Channel limit reached: {current_count}/{subscription.channels_limit} "
-                    f"(tier: {subscription.tier.value})"
-                )
+        await self._ensure_owner_can_add_channel(owner_id)
 
         chat_info = await self._max_client.get_chat(max_chat_id)
 
@@ -66,8 +56,33 @@ class CreateChannelUseCase:
             )
         )
 
+        admin_bypass = False
+        if self._user_repo is not None:
+            owner = await self._user_repo.get_by_id(owner_id)
+            admin_bypass = bool(owner and is_admin_max_user(owner.max_user_id))
+
         logger.info(
             f"Channel registered: max_chat_id={max_chat_id} title={channel.title} owner_id={owner_id}"
             + (" admin_unlimited=1" if admin_bypass else "")
         )
         return channel
+
+    async def _ensure_owner_can_add_channel(self, owner_id: int) -> None:
+        subscription = await self._subscription_repo.get_active_by_user(owner_id)
+        if not subscription:
+            raise ValueError("No active subscription")
+
+        admin_bypass = False
+        if self._user_repo is not None:
+            owner = await self._user_repo.get_by_id(owner_id)
+            admin_bypass = bool(owner and is_admin_max_user(owner.max_user_id))
+
+        if admin_bypass:
+            return
+
+        current_count = await self._channel_repo.count_by_owner(owner_id)
+        if current_count >= subscription.channels_limit:
+            raise ValueError(
+                f"Channel limit reached: {current_count}/{subscription.channels_limit} "
+                f"(tier: {subscription.tier.value})"
+            )

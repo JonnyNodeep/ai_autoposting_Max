@@ -142,19 +142,32 @@ async def _run_keyword_generation(
     topic_brief: str = "",
     channel_title: str = "",
     channel_topic: str = "",
+    session=None,
 ) -> None:
     await max_client.send_message_to_user(
         user_id=max_user_id,
         text="🤖 Подбираю ключевые слова под тему...",
     )
     openai_client = OpenAIService()
-    result = await generate_keywords_for_topic(
-        openai_client,
-        niche=niche,
-        topic_brief=topic_brief,
-        channel_title=channel_title,
-        channel_topic=channel_topic,
-    )
+    from app.application.admin.billing_context import billing_user_for_max_id
+
+    if session is not None:
+        async with billing_user_for_max_id(session, max_user_id):
+            result = await generate_keywords_for_topic(
+                openai_client,
+                niche=niche,
+                topic_brief=topic_brief,
+                channel_title=channel_title,
+                channel_topic=channel_topic,
+            )
+    else:
+        result = await generate_keywords_for_topic(
+            openai_client,
+            niche=niche,
+            topic_brief=topic_brief,
+            channel_title=channel_title,
+            channel_topic=channel_topic,
+        )
     payload = {
         "niche": niche,
         "topic_brief": topic_brief,
@@ -305,7 +318,7 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
         await _show_rss_menu(max_user_id, max_client, state)
         return True
 
-    if callback_data == "ai:block:news_rss:rate":
+    if callback_data in ("ai:block:news_rss:rate", "ai:block:news_rss:spacing"):
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
         if not state:
@@ -315,31 +328,37 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
         await max_client.send_message_to_user(
             user_id=max_user_id,
             text=(
-                "⏱ *Лимит публикаций*\n\n"
-                "Сколько новостей максимум за час.\n"
-                "«Без лимита» — публиковать сразу все найденные "
-                "(до 10 за один опрос)."
+                "⏳ *Интервал между новостями*\n\n"
+                "Минимальная пауза между публикациями в канал.\n"
+                "Если за один опрос нашлось несколько новостей — "
+                "остальные встают в очередь и выходят по одной.\n\n"
+                "«Сразу (пачкой)» — как раньше, до 10 за один опрос."
             ),
-            attachments=[InlineKeyboardBuilder.ai_news_rss_rate_select(block)],
+            attachments=[InlineKeyboardBuilder.ai_news_rss_spacing_select(block)],
             fmt="markdown",
         )
         return True
 
-    if callback_data.startswith("ai:block:news_rss:rate_set:"):
+    if callback_data.startswith("ai:block:news_rss:spacing_set:") or callback_data.startswith(
+        "ai:block:news_rss:rate_set:"
+    ):
         raw = callback_data.split(":")[4]
         try:
-            limit = int(raw)
+            spacing = int(raw)
         except ValueError:
-            limit = 3
-        if limit not in (0, 3, 10):
-            limit = 3
+            spacing = 15
+        from app.application.pipeline.rss_monitor import RSS_PUBLISH_INTERVAL_PRESETS
+
+        allowed = {0, *RSS_PUBLISH_INTERVAL_PRESETS}
+        if spacing not in allowed:
+            spacing = 15
         fsm = AIStudioFSM()
         state = await fsm.get_state(max_user_id)
         if not state:
             await _session_expired(max_user_id, max_client)
             return True
         await fsm.set_block_data(
-            max_user_id, "news_rss", {"max_posts_per_hour": limit}
+            max_user_id, "news_rss", {"publish_interval_minutes": spacing}
         )
         state = await fsm.get_state(max_user_id)
         await sync_active_pipeline(session, state)
@@ -535,6 +554,7 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
             topic_brief=NICHE_LABELS.get(niche, niche),
             channel_title=(channel.title if channel else "") or "",
             channel_topic=(channel.topic if channel else "") or "",
+            session=session,
         )
         return True
 
@@ -604,6 +624,7 @@ async def handle_rss_callback(callback_data: str, max_user_id: int, max_client, 
             topic_brief=brief or NICHE_LABELS.get(niche, niche),
             channel_title=(channel.title if channel else "") or "",
             channel_topic=(channel.topic if channel else "") or "",
+            session=session,
         )
         return True
 
@@ -703,6 +724,7 @@ async def handle_rss_message(max_user_id: int, message_text: str, redis) -> bool
                     topic_brief=brief,
                     channel_title=(channel.title if channel else "") or "",
                     channel_topic=(channel.topic if channel else "") or "",
+                    session=session,
                 )
                 return True
             finally:

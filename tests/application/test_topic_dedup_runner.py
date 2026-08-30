@@ -72,6 +72,8 @@ async def test_runner_skips_blocks_on_topic_dedup_exhausted(monkeypatch):
 
     assert out.post_text == ""
     assert executed == []
+    assert out.meta.get("publish_skipped") == "topic_dedup"
+    assert not out.meta.get("published")
     assert len(max_client.sent) == 1
     assert max_client.sent[0]["user_id"] == 42
     assert "Биохакинг" in max_client.sent[0]["text"]

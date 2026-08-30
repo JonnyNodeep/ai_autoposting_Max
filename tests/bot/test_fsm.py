@@ -77,6 +77,14 @@ async def test_ai_studio_start_creates_session_for_new_user():
     assert updated["blocks"]
 
 
+async def _ensure_studio_state(fsm: AIStudioFSM, user_id: int):
+    """Mirrors handle_entry_callback: start only when Redis state is missing."""
+    state = await fsm.get_state(user_id)
+    if not state:
+        state = await fsm.start(user_id)
+    return state
+
+
 @pytest.mark.asyncio
 async def test_ai_studio_start_preserves_existing_pipelines_cache():
     redis = MockRedis()
@@ -87,7 +95,21 @@ async def test_ai_studio_start_preserves_existing_pipelines_cache():
     before = await fsm.get_state(1)
 
     # Re-entry must not wipe: only start when missing
-    existing = await fsm.get_state(1)
+    existing = await _ensure_studio_state(fsm, 1)
     assert existing is not None
     assert existing["pipelines"] or existing["blocks"]
     assert before["blocks"]["post_gen"]["enabled"] is True
+    assert existing["blocks"]["post_gen"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_ai_studio_channel_select_starts_missing_session():
+    redis = MockRedis()
+    fsm = AIStudioFSM(redis)
+    assert await fsm.get_state(70147830) is None
+
+    await _ensure_studio_state(fsm, 70147830)
+    updated = await fsm.set_channel(70147830, 7)
+    assert updated is not None
+    assert updated["channel_id"] == 7
+    assert updated["step"] == AIStudioStep.SELECT_FEATURES
