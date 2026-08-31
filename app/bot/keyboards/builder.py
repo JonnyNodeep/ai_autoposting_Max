@@ -736,6 +736,41 @@ class InlineKeyboardBuilder:
         )
 
     @classmethod
+    def ai_post_gen_related_toggle(cls) -> dict[str, Any]:
+        return (
+            cls()
+            .row(("✅ Да, добавить другие каналы", "ai:block:post_gen:related:yes"))
+            .row(("❌ Нет", "ai:block:post_gen:related:no"))
+            .row(("Назад к блокам", "ai:back_to_blocks"))
+            .row(("На главную", "main_menu"))
+            .build()
+        )
+
+    @classmethod
+    def ai_post_gen_related_picker(
+        cls,
+        owner_channels: list[Any],
+        *,
+        current_channel_id: int | None,
+        selected_channel_ids: set[int],
+        has_entries: bool,
+    ) -> dict[str, Any]:
+        builder = cls()
+        for ch in owner_channels:
+            ch_id = getattr(ch, "id", None)
+            if ch_id is None or ch_id == current_channel_id:
+                continue
+            title = (getattr(ch, "title", None) or "Канал")[:35]
+            prefix = "☑" if ch_id in selected_channel_ids else "☐"
+            builder.row((f"{prefix} {title}", f"ai:block:post_gen:related:pick:{ch_id}"))
+        builder.row(("➕ Добавить вручную", "ai:block:post_gen:related:manual"))
+        if has_entries:
+            builder.row(("✅ Готово", "ai:block:post_gen:related:done"))
+        builder.row(("Назад к блокам", "ai:back_to_blocks"))
+        builder.row(("На главную", "main_menu"))
+        return builder.build()
+
+    @classmethod
     def ai_post_gen_bold_toggle(cls) -> dict[str, Any]:
         return (
             cls()

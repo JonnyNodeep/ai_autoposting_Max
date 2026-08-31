@@ -316,6 +316,11 @@ async def handle_entry_callback(
             )
             lines.append(f"📋 *Режим:* {mode_display}")
             lines.append(f"📋 *Ссылка на канал:* {'Да' if post.get('add_channel_link') else 'Нет'}")
+            if post.get("related_channels_enabled"):
+                count = len(post.get("related_channels") or [])
+                lines.append(f"📋 *Другие каналы:* Да ({count})")
+            else:
+                lines.append("📋 *Другие каналы:* Нет")
             if post.get("mode") == "ai":
                 lines.append(
                     f"📋 *Жирный заголовок/подзаголовки:* "

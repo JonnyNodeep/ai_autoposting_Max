@@ -123,6 +123,8 @@ DEFAULT_BLOCKS = {
         "user_input": "",
         "generated_post": "",
         "add_channel_link": False,
+        "related_channels_enabled": False,
+        "related_channels": [],
         "bold_headings": True,
         "use_emoji": True,
         "comments_enabled": False,

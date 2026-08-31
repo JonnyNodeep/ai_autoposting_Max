@@ -21,7 +21,126 @@ from app.bot.handlers.ai_studio_entry import (
     _show_blocks,
 )
 from app.bot.handlers.ai_studio_pipeline import sync_active_pipeline
-from app.bot.texts.studio_hints import SUBSCRIBE_CTA_INTRO
+from app.application.pipeline.blocks.post_gen import RELATED_CHANNELS_MAX
+from app.application.pipeline.normalize import normalize_related_channels
+from app.bot.texts.studio_hints import RELATED_CHANNELS_HINT, SUBSCRIBE_CTA_INTRO
+
+
+def _parse_related_channel_manual(text: str) -> tuple[str, str] | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    for sep in ("|", "—", "–"):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            title = left.strip()
+            link = right.strip()
+            if title and link.startswith("http"):
+                return title, link
+            return None
+    if " - " in raw:
+        left, right = raw.split(" - ", 1)
+        title = left.strip()
+        link = right.strip()
+        if title and link.startswith("http"):
+            return title, link
+    return None
+
+
+def _selected_connected_ids(related_channels: list[dict]) -> set[int]:
+    ids: set[int] = set()
+    for item in related_channels:
+        if str(item.get("source") or "") != "connected":
+            continue
+        channel_id = item.get("channel_id")
+        if channel_id is None:
+            continue
+        try:
+            ids.add(int(channel_id))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _related_channels_summary(related_channels: list[dict]) -> str:
+    if not related_channels:
+        return "Пока ничего не выбрано."
+    lines = [f"• {item.get('title', 'Канал')}" for item in related_channels]
+    return "Выбрано:\n" + "\n".join(lines)
+
+
+async def _continue_post_gen_after_related(
+    max_user_id: int,
+    max_client,
+    mode: str,
+) -> None:
+    if mode == "ai":
+        await max_client.send_message_to_user(
+            user_id=max_user_id,
+            text=(
+                "📋 *Текст поста — AI*\n\n"
+                "Жирный заголовок и подзаголовки помогают читать длинные посты.\n\n"
+                "Использовать жирный для заголовков?"
+            ),
+            attachments=[InlineKeyboardBuilder.ai_post_gen_bold_toggle()],
+            fmt="markdown",
+        )
+        return
+    await _ask_brief(max_user_id, max_client, mode)
+
+
+async def _ask_related_channels_toggle(max_user_id: int, max_client) -> None:
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=(
+            "📋 *Текст поста — другие каналы*\n\n"
+            f"{RELATED_CHANNELS_HINT}\n\n"
+            "Добавить блок с другими каналами?"
+        ),
+        attachments=[InlineKeyboardBuilder.ai_post_gen_related_toggle()],
+        fmt="markdown",
+    )
+
+
+async def _show_related_channels_picker(
+    max_user_id: int,
+    max_client,
+    channel_repo,
+    state: dict,
+) -> None:
+    current_channel_id = state.get("channel_id")
+    channel = (
+        await channel_repo.get_by_id(current_channel_id)
+        if current_channel_id
+        else None
+    )
+    owner_channels: list = []
+    if channel is not None:
+        owner_channels = await channel_repo.get_by_owner(channel.owner_id)
+
+    post_block = state.get("blocks", {}).get("post_gen", {})
+    related_channels = list(post_block.get("related_channels") or [])
+    selected_ids = _selected_connected_ids(related_channels)
+
+    await max_client.send_message_to_user(
+        user_id=max_user_id,
+        text=(
+            "📋 *Другие каналы*\n\n"
+            f"{_related_channels_summary(related_channels)}\n\n"
+            "Отметьте подключённые каналы или добавьте вручную.\n"
+            f"Формат ручного ввода: `Название | https://...`\n"
+            f"Максимум {RELATED_CHANNELS_MAX} каналов."
+        ),
+        attachments=[
+            InlineKeyboardBuilder.ai_post_gen_related_picker(
+                owner_channels,
+                current_channel_id=current_channel_id,
+                selected_channel_ids=selected_ids,
+                has_entries=bool(related_channels),
+            )
+        ],
+        fmt="markdown",
+    )
 
 
 async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
@@ -140,20 +259,141 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
                 ),
             )
 
-        if mode == "ai":
+        await _ask_related_channels_toggle(max_user_id, max_client)
+        return True
+
+    if callback_data.startswith("ai:block:post_gen:related:"):
+        action = callback_data.split(":")[4]
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        if not state:
+            await _session_expired(max_user_id, max_client)
+            return True
+
+        block = state.get("blocks", {}).get("post_gen", {})
+        mode = block.get("mode", "ai")
+
+        if action == "no":
+            await fsm.set_block_data(
+                max_user_id,
+                "post_gen",
+                {"related_channels_enabled": False},
+            )
+            await _continue_post_gen_after_related(max_user_id, max_client, mode)
+            return True
+
+        if action == "yes":
+            post_block = dict(block)
+            if not post_block.get("related_channels_enabled"):
+                await fsm.set_block_data(
+                    max_user_id,
+                    "post_gen",
+                    {"related_channels_enabled": True},
+                )
+            state = await fsm.get_state(max_user_id) or state
+            await _show_related_channels_picker(max_user_id, max_client, channel_repo, state)
+            return True
+
+        if action == "manual":
+            redis = await get_redis()
+            await claim_text_input(redis, max_user_id, "post_gen_related", "1", REDIS_TTL)
             await max_client.send_message_to_user(
                 user_id=max_user_id,
                 text=(
-                    "📋 *Текст поста — AI*\n\n"
-                    "Жирный заголовок и подзаголовки помогают читать длинные посты.\n\n"
-                    "Использовать жирный для заголовков?"
+                    "📋 *Добавить канал вручную*\n\n"
+                    "Отправьте одной строкой:\n"
+                    "`Название канала | https://...`"
                 ),
-                attachments=[InlineKeyboardBuilder.ai_post_gen_bold_toggle()],
                 fmt="markdown",
             )
             return True
 
-        await _ask_brief(max_user_id, max_client, mode)
+        if action == "done":
+            state = await fsm.get_state(max_user_id) or state
+            related = list(
+                state.get("blocks", {}).get("post_gen", {}).get("related_channels") or []
+            )
+            if not related:
+                await max_client.send_message_to_user(
+                    user_id=max_user_id,
+                    text="Выберите хотя бы один канал или нажмите «Нет» на предыдущем шаге.",
+                )
+                await _show_related_channels_picker(
+                    max_user_id, max_client, channel_repo, state
+                )
+                return True
+            normalized = normalize_related_channels(related)
+            await fsm.set_block_data(
+                max_user_id,
+                "post_gen",
+                {
+                    "related_channels_enabled": True,
+                    "related_channels": normalized,
+                },
+            )
+            await _continue_post_gen_after_related(max_user_id, max_client, mode)
+            return True
+
+        if action == "pick":
+            try:
+                picked_id = int(callback_data.split(":")[5])
+            except (IndexError, ValueError):
+                return True
+            if picked_id == state.get("channel_id"):
+                return True
+
+            related = list(block.get("related_channels") or [])
+            selected_ids = _selected_connected_ids(related)
+            if picked_id in selected_ids:
+                related = [
+                    item
+                    for item in related
+                    if not (
+                        str(item.get("source") or "") == "connected"
+                        and item.get("channel_id") == picked_id
+                    )
+                ]
+            else:
+                if len(related) >= RELATED_CHANNELS_MAX:
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=f"Максимум {RELATED_CHANNELS_MAX} каналов в списке.",
+                    )
+                    state = await fsm.get_state(max_user_id) or state
+                    await _show_related_channels_picker(
+                        max_user_id, max_client, channel_repo, state
+                    )
+                    return True
+                picked = await channel_repo.get_by_id(picked_id)
+                if picked is None:
+                    return True
+                link = (picked.channel_link or "").strip()
+                if not link:
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=(
+                            f"У канала «{picked.title}» пока нет ссылки — "
+                            "бот подставит её, когда канал полностью подключён."
+                        ),
+                    )
+                related.append(
+                    {
+                        "title": picked.title,
+                        "link": link,
+                        "source": "connected",
+                        "channel_id": picked.id,
+                    }
+                )
+            related = normalize_related_channels(related)
+            await fsm.set_block_data(
+                max_user_id,
+                "post_gen",
+                {"related_channels": related, "related_channels_enabled": True},
+            )
+            state = await fsm.get_state(max_user_id) or state
+            await _show_related_channels_picker(max_user_id, max_client, channel_repo, state)
+            return True
+
         return True
 
     if callback_data.startswith("ai:block:post_gen:bold:"):
@@ -330,6 +570,7 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
     if callback_data == "ai:post_gen:cancel":
         redis = await get_redis()
         await redis.delete(f"ai_post_gen_wait:{max_user_id}")
+        await redis.delete(f"ai_post_gen_related_wait:{max_user_id}")
         await redis.delete(f"ai_post_gen_review:{max_user_id}")
 
         fsm = AIStudioFSM()
@@ -359,6 +600,58 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
 
 
 async def handle_post_message(max_user_id: int, message_text: str, redis) -> bool:
+    related_wait_key = f"ai_post_gen_related_wait:{max_user_id}"
+    if await redis.get(related_wait_key):
+        await redis.delete(related_wait_key)
+        parsed = _parse_related_channel_manual(message_text)
+        async with async_session_factory() as session:
+            channel_repo = SQLAlchemyChannelRepository(session)
+            max_client = MaxAPIHTTPClient()
+            try:
+                if not parsed:
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=(
+                            "Не удалось разобрать строку.\n"
+                            "Пример: `Биохакинг | https://max.ru/bio`"
+                        ),
+                        fmt="markdown",
+                    )
+                    return True
+
+                title, link = parsed
+                fsm = AIStudioFSM()
+                state = await fsm.get_state(max_user_id)
+                if not state:
+                    return True
+
+                related = list(
+                    state.get("blocks", {}).get("post_gen", {}).get("related_channels") or []
+                )
+                if len(related) >= RELATED_CHANNELS_MAX:
+                    await max_client.send_message_to_user(
+                        user_id=max_user_id,
+                        text=f"Максимум {RELATED_CHANNELS_MAX} каналов в списке.",
+                    )
+                    return True
+
+                related.append(
+                    {"title": title, "link": link, "source": "manual"},
+                )
+                related = normalize_related_channels(related)
+                await fsm.set_block_data(
+                    max_user_id,
+                    "post_gen",
+                    {"related_channels": related, "related_channels_enabled": True},
+                )
+                state = await fsm.get_state(max_user_id) or state
+                await _show_related_channels_picker(
+                    max_user_id, max_client, channel_repo, state
+                )
+            finally:
+                await max_client.close()
+        return True
+
     post_wait_key = f"ai_post_gen_wait:{max_user_id}"
     wait_data = await redis.get(post_wait_key)
     if not wait_data:

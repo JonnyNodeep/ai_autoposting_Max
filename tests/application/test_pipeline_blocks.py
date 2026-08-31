@@ -7,6 +7,7 @@ from app.application.pipeline.normalize import (
     mix_slot_brief,
     mix_slot_image_addon,
     normalize_blocks_config,
+    normalize_related_channels,
     resolve_post_brief,
     resolve_slot_image_addon,
     steps_to_ui_dict,
@@ -18,7 +19,12 @@ from app.application.pipeline.context import PipelineContext
 from app.application.pipeline.blocks.registry import BlockRegistry
 from app.application.pipeline.blocks.image_prompt import ImagePromptBlock
 from app.application.pipeline.blocks.image_gen import ImageGenBlock
-from app.application.pipeline.blocks.post_gen import PostGenBlock
+from app.application.pipeline.blocks.post_gen import (
+    PostGenBlock,
+    RELATED_CHANNELS_INTRO,
+    build_related_channels_footer,
+    build_subscribe_cta,
+)
 from app.bot.states.ai_studio import DEFAULT_BLOCKS
 
 
@@ -1831,3 +1837,166 @@ async def test_post_gen_skips_watermark_without_logo(tmp_path):
         {"enabled": True, "generated_post": "Пост", "add_channel_link": False},
     )
     assert uploaded == [str(src)]
+
+
+def test_build_related_channels_footer_format():
+    footer = build_related_channels_footer(
+        [
+            {"title": "Bio [demo]", "link": "https://max.ru/bio"},
+            {"title": "Yoga", "link": "https://max.ru/yoga"},
+        ]
+    )
+    assert footer.startswith(f"\n\n{RELATED_CHANNELS_INTRO}\n\n")
+    assert "[Bio \\[demo\\]](https://max.ru/bio)" in footer
+    assert "[Yoga](https://max.ru/yoga)" in footer
+    assert footer.count("\n") >= 3
+
+
+def test_build_related_channels_footer_empty():
+    assert build_related_channels_footer([]) == ""
+    assert build_related_channels_footer([{"title": "", "link": "https://x"}]) == ""
+
+
+def test_normalize_related_channels_dedupe_and_limit():
+    raw = [
+        {"title": "A", "link": "https://max.ru/a", "source": "manual"},
+        {"title": "B", "link": "https://max.ru/a/", "source": "manual"},
+        {"title": "C", "link": "https://max.ru/c", "source": "manual"},
+        {"title": "D", "link": "https://max.ru/d", "source": "manual"},
+        {"title": "E", "link": "https://max.ru/e", "source": "manual"},
+        {"title": "F", "link": "https://max.ru/f", "source": "manual"},
+        {"title": "G", "link": "https://max.ru/g", "source": "manual"},
+        {"title": "H", "link": "https://max.ru/h", "source": "manual"},
+    ]
+    out = normalize_related_channels(raw)
+    assert len(out) == 7
+    assert out[0]["title"] == "A"
+    assert all(item["link"].startswith("http") for item in out)
+
+
+def test_normalize_related_channels_connected_without_link():
+    out = normalize_related_channels(
+        [
+            {
+                "title": "My Channel",
+                "link": "",
+                "source": "connected",
+                "channel_id": 3,
+            }
+        ]
+    )
+    assert len(out) == 1
+    assert out[0]["channel_id"] == 3
+    assert out[0]["link"] == ""
+
+
+@pytest.mark.asyncio
+async def test_post_gen_related_before_subscribe():
+    sent: list[dict] = []
+
+    class _Max:
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"text": text})
+
+    class _Channel:
+        max_chat_id = 42
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/current",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        channel_title="Current",
+        post_text="Основной текст",
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "Основной текст",
+            "add_channel_link": True,
+            "related_channels_enabled": True,
+            "related_channels": [
+                {"title": "Bio", "link": "https://max.ru/bio", "source": "manual"},
+            ],
+        },
+    )
+    text = sent[0]["text"]
+    assert text.index("Основной текст") < text.index(RELATED_CHANNELS_INTRO)
+    assert text.index(RELATED_CHANNELS_INTRO) < text.index("Подпишись")
+    assert "[Bio](https://max.ru/bio)" in text
+
+
+@pytest.mark.asyncio
+async def test_post_gen_related_only_no_subscribe():
+    sent: list[dict] = []
+
+    class _Max:
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"text": text})
+
+    class _Channel:
+        max_chat_id = 42
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        post_text="Только related",
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "Только related",
+            "add_channel_link": False,
+            "related_channels_enabled": True,
+            "related_channels": [
+                {"title": "Bio", "link": "https://max.ru/bio", "source": "manual"},
+            ],
+        },
+    )
+    text = sent[0]["text"]
+    assert RELATED_CHANNELS_INTRO in text
+    assert "Подпишись" not in text
+
+
+@pytest.mark.asyncio
+async def test_post_gen_subscribe_only_no_related():
+    sent: list[dict] = []
+
+    class _Max:
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"text": text})
+
+    class _Channel:
+        max_chat_id = 42
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="https://max.ru/current",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        channel_title="Current",
+        post_text="Без related",
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "generated_post": "Без related",
+            "add_channel_link": True,
+            "related_channels_enabled": False,
+        },
+    )
+    text = sent[0]["text"]
+    assert RELATED_CHANNELS_INTRO not in text
+    assert "Подпишись" in text
+    assert build_subscribe_cta("https://max.ru/current", title="Current") in text

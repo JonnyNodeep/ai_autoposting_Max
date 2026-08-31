@@ -22,6 +22,11 @@ SHARE_CTA_AUDIO = (
     "\n\nПоделитесь с друзьями — пусть и у них будет добрая сказка перед сном"
 )
 
+RELATED_CHANNELS_INTRO = (
+    "У нас есть ещё другие каналы, которые вам могут понравиться:"
+)
+RELATED_CHANNELS_MAX = 7
+
 
 def build_subscribe_cta(
     link: str,
@@ -32,6 +37,66 @@ def build_subscribe_cta(
     if personalized:
         return f"\n\n**👉 [Подпишись на {_escape_md(title)}]({link})**"
     return f"\n\n**👉 [Подпишись на канал]({link})**"
+
+
+def build_related_channels_footer(channels: list[dict]) -> str:
+    """Append a vertical list of linked channel names before subscribe CTA."""
+    lines: list[str] = []
+    for ch in channels:
+        title = (ch.get("title") or "").strip()
+        link = (ch.get("link") or "").strip()
+        if title and link:
+            lines.append(f"[{_escape_md(title)}]({link})")
+    if not lines:
+        return ""
+    return f"\n\n{RELATED_CHANNELS_INTRO}\n\n" + "\n".join(lines)
+
+
+async def resolve_related_channels(
+    channels: list[dict],
+    *,
+    current_channel_id: int | None = None,
+) -> list[dict[str, str]]:
+    """Resolve connected channel links from DB; skip invalid or duplicate entries."""
+    from app.infrastructure.database.session import async_session_factory
+    from app.infrastructure.repositories.channel_repository import SQLAlchemyChannelRepository
+
+    result: list[dict[str, str]] = []
+    seen_links: set[str] = set()
+
+    async with async_session_factory() as session:
+        repo = SQLAlchemyChannelRepository(session)
+        for item in channels or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            link = str(item.get("link") or "").strip()
+            source = str(item.get("source") or "").strip()
+            channel_id = item.get("channel_id")
+
+            if source == "connected" and channel_id is not None:
+                try:
+                    ch_id = int(channel_id)
+                except (TypeError, ValueError):
+                    ch_id = None
+                if ch_id is not None and ch_id == current_channel_id:
+                    continue
+                if ch_id is not None:
+                    ch = await repo.get_by_id(ch_id)
+                    if ch is not None:
+                        title = (ch.title or title).strip()
+                        link = (ch.channel_link or link or "").strip()
+
+            if not title or not link.startswith("http"):
+                continue
+            link_norm = link.lower().rstrip("/")
+            if link_norm in seen_links:
+                continue
+            seen_links.add(link_norm)
+            result.append({"title": title, "link": link})
+            if len(result) >= RELATED_CHANNELS_MAX:
+                break
+    return result
 
 
 def build_share_cta_audio(post_text: str) -> str:
@@ -403,18 +468,30 @@ class PostGenBlock:
             elif not (ctx.target == "channel" and has_video):
                 return
 
+        body = post_text
         if has_audio:
-            post_text = build_share_cta_audio(post_text)
+            body = build_share_cta_audio(body)
 
-        body_without_cta = post_text
+        if config.get("related_channels_enabled"):
+            current_id = getattr(ctx.channel, "id", None) if ctx.channel is not None else None
+            resolved = await resolve_related_channels(
+                config.get("related_channels") or [],
+                current_channel_id=current_id,
+            )
+            footer = build_related_channels_footer(resolved)
+            if footer:
+                body = body + footer
+
+        body_without_cta = body
         add_link = bool(config.get("add_channel_link") and ctx.channel_link)
         if add_link:
-            post_text = body_without_cta + build_subscribe_cta(
+            body = body + build_subscribe_cta(
                 ctx.channel_link,
                 title=ctx.channel_title or "канал",
                 personalized=(ctx.target == "user"),
             )
 
+        post_text = body
         ctx.post_text = post_text
 
         publish_image: str | None = None

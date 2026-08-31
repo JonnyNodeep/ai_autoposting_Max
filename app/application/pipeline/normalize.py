@@ -83,6 +83,8 @@ _CONFIG_KEYS = {
         "user_input",
         "generated_post",
         "add_channel_link",
+        "related_channels_enabled",
+        "related_channels",
         "bold_headings",
         "use_emoji",
         "comments_enabled",
@@ -123,12 +125,66 @@ _CONFIG_KEYS = {
 }
 
 
+RELATED_CHANNELS_MAX = 7
+
+
+def normalize_related_channels(raw: Any) -> list[dict[str, Any]]:
+    """Validate, dedupe by link or channel_id, cap related channel entries."""
+    if not isinstance(raw, list):
+        return []
+    seen_links: set[str] = set()
+    seen_ids: set[int] = set()
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        link = str(item.get("link") or "").strip()
+        source = str(item.get("source") or "manual").strip() or "manual"
+        channel_id = item.get("channel_id")
+        ch_id: int | None = None
+        if channel_id is not None:
+            try:
+                ch_id = int(channel_id)
+            except (TypeError, ValueError):
+                ch_id = None
+        is_connected = source == "connected" and ch_id is not None
+        if not title:
+            continue
+        if is_connected:
+            if ch_id in seen_ids:
+                continue
+            if link and not link.startswith("http"):
+                continue
+            seen_ids.add(ch_id)
+        else:
+            if not link.startswith("http"):
+                continue
+            link_norm = link.lower().rstrip("/")
+            if link_norm in seen_links:
+                continue
+            seen_links.add(link_norm)
+        entry: dict[str, Any] = {
+            "title": title[:256],
+            "link": link[:512],
+            "source": source,
+        }
+        if ch_id is not None:
+            entry["channel_id"] = ch_id
+        out.append(entry)
+        if len(out) >= RELATED_CHANNELS_MAX:
+            break
+    return out
+
+
 def _normalize_post_gen_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = dict(config or {})
     cfg["topic_queue"] = normalize_topic_queue(cfg.get("topic_queue"))
     cfg["topic_history"] = normalize_topic_history(cfg.get("topic_history"))
     extra = str(cfg.get("topic_gen_extra") or "").strip()
     cfg["topic_gen_extra"] = extra[:1500]
+    cfg["related_channels_enabled"] = bool(cfg.get("related_channels_enabled"))
+    cfg["related_channels"] = normalize_related_channels(cfg.get("related_channels"))
     return cfg
 
 

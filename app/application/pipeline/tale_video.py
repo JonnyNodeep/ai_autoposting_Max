@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import random
 import re
 import uuid
 from dataclasses import asdict, dataclass
@@ -44,8 +45,24 @@ _JSON_FIELD_RE = re.compile(
     re.DOTALL,
 )
 IMAGE_CONCURRENCY = 3
+IMAGE_MAX_RETRIES = 4
+RETRYABLE_IMAGE_STATUS = (429, 500, 502, 503, 504)
 MAX_STORY_LLM_ATTEMPTS = 2
 OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+
+
+def _is_retryable_image_status(status_code: int) -> bool:
+    return status_code in RETRYABLE_IMAGE_STATUS
+
+
+def _retry_after_seconds(resp: httpx.Response, attempt: int) -> float:
+    raw = resp.headers.get("Retry-After")
+    if raw:
+        try:
+            return max(float(raw), 0.5)
+        except ValueError:
+            pass
+    return (2**attempt) + random.uniform(0, 1)
 
 
 @dataclass(frozen=True)
@@ -583,6 +600,18 @@ async def synthesize_tale_audio_sunor(
     ) from last_exc
 
 
+def _image_bytes_from_b64_or_url(data: dict[str, Any]) -> bytes | str:
+    """Return raw bytes from b64_json, or URL string to download."""
+    image_data = (data.get("data") or [{}])[0]
+    b64_json = image_data.get("b64_json")
+    if b64_json:
+        return base64.b64decode(b64_json)
+    url = image_data.get("url")
+    if isinstance(url, str) and url.startswith("http"):
+        return url
+    raise TaleGenerationError("Пустой ответ OpenAI Images")
+
+
 async def _generate_scene_image_bytes(prompt: str) -> bytes:
     api_key = (settings.openai.api_key or "").strip()
     if not api_key:
@@ -597,31 +626,82 @@ async def _generate_scene_image_bytes(prompt: str) -> bytes:
         "size": size,
         "quality": quality,
     }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    prompt_preview = (prompt or "")[:200]
+    last_status: int | None = None
+
     async with httpx.AsyncClient(timeout=180.0) as client:
-        resp = await client.post(
-            OPENAI_IMAGES_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-    if resp.status_code != 200:
-        raise TaleGenerationError(
-            f"Не удалось сгенерировать иллюстрацию сцены ({resp.status_code})"
-        )
-    data = resp.json()
-    image_data = (data.get("data") or [{}])[0]
-    b64_json = image_data.get("b64_json")
-    if b64_json:
-        return base64.b64decode(b64_json)
-    url = image_data.get("url")
-    if isinstance(url, str) and url.startswith("http"):
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            return r.content
-    raise TaleGenerationError("Пустой ответ OpenAI Images")
+        for attempt in range(IMAGE_MAX_RETRIES + 1):
+            try:
+                resp = await client.post(
+                    OPENAI_IMAGES_URL,
+                    headers=headers,
+                    json=payload,
+                )
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                if attempt < IMAGE_MAX_RETRIES:
+                    wait = (2**attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        "OpenAI scene image network error (attempt {}/{}): {} "
+                        "retrying in {:.1f}s prompt_preview={!r}",
+                        attempt + 1,
+                        IMAGE_MAX_RETRIES + 1,
+                        exc,
+                        wait,
+                        prompt_preview,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise TaleGenerationError(
+                    "Не удалось сгенерировать иллюстрацию сцены (network)"
+                ) from exc
+
+            if resp.status_code == 200:
+                data = resp.json()
+                result = _image_bytes_from_b64_or_url(data)
+                if isinstance(result, str):
+                    async with httpx.AsyncClient(
+                        timeout=120.0, follow_redirects=True
+                    ) as dl_client:
+                        r = await dl_client.get(result)
+                        r.raise_for_status()
+                        return r.content
+                return result
+
+            last_status = resp.status_code
+            body_preview = (resp.text or "")[:500]
+            logger.error(
+                "OpenAI scene image failed status={} model={} size={} quality={} "
+                "attempt={}/{} prompt_preview={!r} body={!r}",
+                resp.status_code,
+                model,
+                size,
+                quality,
+                attempt + 1,
+                IMAGE_MAX_RETRIES + 1,
+                prompt_preview,
+                body_preview,
+            )
+            if _is_retryable_image_status(resp.status_code) and attempt < IMAGE_MAX_RETRIES:
+                wait = _retry_after_seconds(resp, attempt)
+                logger.warning(
+                    "OpenAI scene image retrying in {:.1f}s (attempt {}/{})",
+                    wait,
+                    attempt + 1,
+                    IMAGE_MAX_RETRIES + 1,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise TaleGenerationError(
+                f"Не удалось сгенерировать иллюстрацию сцены ({resp.status_code})"
+            )
+
+    raise TaleGenerationError(
+        f"Не удалось сгенерировать иллюстрацию сцены ({last_status or 'unknown'})"
+    )
 
 
 async def generate_scene_images(
