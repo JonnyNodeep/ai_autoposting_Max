@@ -66,7 +66,10 @@ async def test_drive_video_empty_folder_skips(ctx):
 
 
 @pytest.mark.asyncio
-async def test_drive_video_downloads_next(ctx, tmp_path):
+async def test_drive_video_downloads_next(ctx, tmp_path, monkeypatch):
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
     block = DriveVideoBlock()
     config = {
         "enabled": True,
@@ -115,7 +118,10 @@ async def test_drive_video_downloads_next(ctx, tmp_path):
 
     assert ctx.meta.get("drive_file_id") == "f1"
     assert ctx.post_text == "My caption"
-    assert Path(ctx.video_local_path).exists()
+    from app.application.pipeline.upload_cleanup import cleanup_pipeline_uploads
+
+    cleanup_pipeline_uploads(ctx)
+    assert not Path(ctx.video_local_path).exists()
 
 
 @pytest.mark.asyncio

@@ -352,6 +352,7 @@ async def _run_video_test(
     )
 
     vidgo = VidGoClient()
+    local_path = None
     try:
         if image_url.startswith("http://") or image_url.startswith("https://"):
             vidgo_image_url = image_url
@@ -414,6 +415,8 @@ async def _run_video_test(
 
         from app.infrastructure.services.openai_client import UPLOAD_DIR
 
+        from app.application.pipeline.upload_cleanup import safe_unlink_upload
+
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as dl_client:
             dl_response = await dl_client.get(video_url)
             dl_response.raise_for_status()
@@ -437,4 +440,6 @@ async def _run_video_test(
         )
     finally:
         await vidgo.close()
+        if local_path is not None:
+            safe_unlink_upload(str(local_path))
     return None

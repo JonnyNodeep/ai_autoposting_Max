@@ -127,13 +127,15 @@ async def test_generate_logo(sample_channel, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_logo_keeps_local_file_after_upload(sample_channel, tmp_path, monkeypatch):
+async def test_generate_logo_cleans_intermediate_file_after_upload(sample_channel, tmp_path, monkeypatch):
     from pathlib import Path
 
     import app.application.channels.watermark_logo as wm
+    import app.application.pipeline.upload_cleanup as uc
     from PIL import Image
 
     monkeypatch.setattr(wm, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
 
     local = tmp_path / "logo_xyz.png"
     Image.new("RGB", (8, 8), color=(9, 9, 9)).save(local)
@@ -151,7 +153,7 @@ async def test_generate_logo_keeps_local_file_after_upload(sample_channel, tmp_p
     dest = tmp_path / "logos" / "1.png"
     assert token == "max-logo-token"
     mock_max.upload_file.assert_awaited_once_with(str(dest), "image")
-    assert Path(local).exists()
+    assert not Path(local).exists()
     assert dest.exists()
     assert repo._channel.logo_path == str(dest)
 

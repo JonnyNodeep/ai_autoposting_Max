@@ -115,6 +115,10 @@ class GenerateLogoUseCase:
             return ""
 
         path = await save_watermark_logo(channel, self._channel_repo, result)
+        if result != path:
+            from app.application.pipeline.upload_cleanup import safe_unlink_upload
+
+            safe_unlink_upload(result)
         if self._max_client:
             channel.logo_token = await self._max_client.upload_file(path, "image")
         else:

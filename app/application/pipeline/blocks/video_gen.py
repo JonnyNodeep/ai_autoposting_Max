@@ -82,7 +82,6 @@ class VideoGenBlock:
             local_path.write_bytes(dl_response.content)
 
             ctx.video_token = await ctx.max_client.upload_file(str(local_path), "video")
-            # Keep file in uploads for later reuse (Pinterest, etc.).
             ctx.video_local_path = str(local_path)
         except Exception as e:
             logger.exception(f"Pipeline video_gen failed run_id={ctx.run_id}: {e}")

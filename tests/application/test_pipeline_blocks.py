@@ -15,6 +15,7 @@ from app.application.pipeline.normalize import (
     is_v2,
 )
 from app.application.pipeline.runner import PipelineRunner
+from app.application.pipeline.upload_cleanup import cleanup_pipeline_uploads
 from app.application.pipeline.context import PipelineContext
 from app.application.pipeline.blocks.registry import BlockRegistry
 from app.application.pipeline.blocks.image_prompt import ImagePromptBlock
@@ -464,10 +465,13 @@ async def test_post_gen_appends_slot_addon_to_general_brief():
 
 
 @pytest.mark.asyncio
-async def test_video_gen_calls_generate_with_fallback(tmp_path):
+async def test_video_gen_calls_generate_with_fallback(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock, patch
 
     from app.application.pipeline.blocks.video_gen import VideoGenBlock
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
 
     captured: dict = {}
 
@@ -536,13 +540,13 @@ async def test_video_gen_calls_generate_with_fallback(tmp_path):
             },
         )
 
+    cleanup_pipeline_uploads(ctx)
     assert captured["kwargs"]["prompt"] == "slow zoom"
     assert captured["kwargs"]["image_url"] == "https://cdn/img.png"
     assert captured["kwargs"]["config"]["model"] == "seedance-1.5-pro"
     assert ctx.video_token == "max-video-token"
     assert captured.get("closed") is True
-    assert Path(ctx.video_local_path).exists()
-    assert Path(ctx.video_local_path).parent == tmp_path
+    assert not Path(ctx.video_local_path).exists()
     assert captured["upload"][1] == "video"
 
 
@@ -1350,7 +1354,10 @@ async def test_post_gen_prefers_video_over_image():
 
 
 @pytest.mark.asyncio
-async def test_post_gen_keeps_local_image_after_upload(tmp_path):
+async def test_post_gen_cleans_local_image_after_upload(tmp_path, monkeypatch):
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
     local = tmp_path / "logo_abc.png"
     local.write_bytes(b"fake-png")
     uploaded: list[tuple[str, str]] = []
@@ -1384,8 +1391,9 @@ async def test_post_gen_keeps_local_image_after_upload(tmp_path):
             "add_channel_link": False,
         },
     )
+    cleanup_pipeline_uploads(ctx)
     assert uploaded == [(str(local), "image")]
-    assert local.exists()
+    assert not local.exists()
     assert ctx.image_url == str(local)
 
 
@@ -1420,7 +1428,10 @@ async def test_post_gen_keeps_remote_image_url():
 
 
 @pytest.mark.asyncio
-async def test_post_gen_uploads_audio_and_keeps_local_file(tmp_path):
+async def test_post_gen_uploads_audio_and_cleans_local_file(tmp_path, monkeypatch):
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
     local = tmp_path / "tts_story.mp3"
     local.write_bytes(b"fake-mp3")
     uploaded: list[tuple[str, str]] = []
@@ -1456,17 +1467,21 @@ async def test_post_gen_uploads_audio_and_keeps_local_file(tmp_path):
             "add_channel_link": False,
         },
     )
+    cleanup_pipeline_uploads(ctx)
     assert uploaded == [(str(local), "audio")]
     assert sent[0]["attachments"] == [
         {"type": "audio", "payload": {"token": "audio-token"}}
     ]
     assert "Поделитесь с друзьями — пусть и у них будет добрая сказка перед сном" in sent[0]["text"]
-    assert local.exists()
+    assert not local.exists()
     assert ctx.audio_local_path == str(local)
 
 
 @pytest.mark.asyncio
-async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path):
+async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path, monkeypatch):
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
     local_audio = tmp_path / "story.mp3"
     local_audio.write_bytes(b"fake-mp3")
     local_image = tmp_path / "cover.png"
@@ -1500,6 +1515,7 @@ async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path):
         ctx,
         {"enabled": True, "add_channel_link": False},
     )
+    cleanup_pipeline_uploads(ctx)
     assert len(sent) == 2
     assert sent[0]["attachments"] == [
         {"type": "image", "payload": {"token": "image-token"}}
@@ -1508,8 +1524,8 @@ async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path):
     assert sent[1]["attachments"] == [
         {"type": "audio", "payload": {"token": "audio-token"}}
     ]
-    assert local_audio.exists()
-    assert local_image.exists()
+    assert not local_audio.exists()
+    assert not local_image.exists()
 
 
 @pytest.mark.asyncio

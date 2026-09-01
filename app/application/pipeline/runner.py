@@ -14,6 +14,7 @@ from app.application.pipeline.recent_topics import (
     topic_from_post_text,
 )
 from app.application.pipeline.topic_queue import get_topic_queue_from_post_cfg, pop_topic
+from app.application.pipeline.upload_cleanup import cleanup_pipeline_uploads
 
 
 def _style_profile_dict(channel: Any) -> dict[str, Any] | None:
@@ -69,6 +70,12 @@ class PipelineRunner:
             return await self._run_impl(ctx, blocks_config)
 
     async def _run_impl(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
+        try:
+            return await self._run_blocks(ctx, blocks_config)
+        finally:
+            cleanup_pipeline_uploads(ctx)
+
+    async def _run_blocks(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
         v2 = normalize_blocks_config(blocks_config)
         ctx.meta["pipeline_schedule"] = v2.get("schedule") or {}
 
