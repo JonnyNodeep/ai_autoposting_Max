@@ -17,6 +17,10 @@ from app.bot.handlers.ai_studio_rss import handle_rss_callback, handle_rss_messa
 from app.bot.handlers.ai_studio_schedule import handle_schedule_callback, handle_schedule_message
 from app.bot.handlers.ai_studio_story import handle_story_callback, handle_story_message
 from app.bot.handlers.ai_studio_sunor import handle_sunor_callback, handle_sunor_message
+from app.bot.handlers.ai_studio_meditation import (
+    handle_meditation_callback,
+    handle_meditation_message,
+)
 from app.bot.handlers.ai_studio_topic_queue import (
     handle_topic_count_message,
     handle_topic_gen_extra_message,
@@ -87,6 +91,10 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                     return
                 if await handle_post_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
+                if await handle_meditation_callback(
+                    callback_data, max_user_id, max_client, channel_repo, session
+                ):
+                    return
                 if await handle_topic_queue_callback(
                     callback_data, max_user_id, max_client, channel_repo, session
                 ):
@@ -134,12 +142,33 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
             max_user_id = int(max_user_id_raw) if max_user_id_raw is not None else None
         except (TypeError, ValueError):
             max_user_id = None
-        message_text = (msg.get("body") or {}).get("text", "")
+        body = msg.get("body") or {}
+        message_text = body.get("text", "") or ""
+        attachments = body.get("attachments") or []
 
-        if not max_user_id or not message_text:
+        if not max_user_id:
             return False
 
         redis = await get_redis()
+
+        if attachments or message_text:
+            async with async_session_factory() as session:
+                max_client = MaxAPIHTTPClient()
+                try:
+                    if await handle_meditation_message(
+                        max_user_id,
+                        message_text,
+                        redis,
+                        max_client,
+                        session,
+                        attachments=attachments,
+                    ):
+                        return True
+                finally:
+                    await max_client.close()
+
+        if not message_text:
+            return False
 
         if await handle_image_message(max_user_id, message_text, redis):
             return True

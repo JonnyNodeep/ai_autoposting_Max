@@ -85,12 +85,13 @@ class OpenAIService(OpenAIClient):
         )
         return response.choices[0].message.content or ""
 
-    async def generate_image(self, prompt: str) -> str:
+    async def generate_image(self, prompt: str, *, size: str | None = None) -> str:
+        image_size = (size or "1024x1024").strip() or "1024x1024"
         response = await self._client.images.generate(
             model=self._image_model,
             prompt=prompt,
             n=1,
-            size="1024x1024",
+            size=image_size,
             quality=self._image_quality,
         )
         await self._record_usage(

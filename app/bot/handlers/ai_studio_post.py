@@ -143,7 +143,25 @@ async def _show_related_channels_picker(
     )
 
 
-async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
+def _current_post_brief(block: dict, mode: str) -> str:
+    if mode == "ai":
+        return str(block.get("user_input") or "").strip()
+    return str(block.get("generated_post") or block.get("user_input") or "").strip()
+
+
+def _format_existing_brief(existing: str, limit: int = 3500) -> str:
+    text = existing.strip()
+    if len(text) > limit:
+        return text[:limit] + "…"
+    return text
+
+
+async def _ask_brief(
+    max_user_id: int,
+    max_client,
+    mode: str,
+    existing: str | None = None,
+) -> None:
     redis = await get_redis()
     await claim_text_input(redis, max_user_id, "post_gen", mode, REDIS_TTL)
 
@@ -151,23 +169,49 @@ async def _ask_brief(max_user_id: int, max_client, mode: str) -> None:
     builder.row(("Назад к блокам", "ai:post_gen:cancel"))
     builder.row(("На главную", "main_menu"))
 
+    if existing is None:
+        fsm = AIStudioFSM()
+        state = await fsm.get_state(max_user_id)
+        block = (state or {}).get("blocks", {}).get("post_gen", {})
+        existing = _current_post_brief(block, mode)
+
+    existing = (existing or "").strip()
+
     if mode == "ai":
-        prompt_text = (
-            "📋 *Генерация поста — AI*\n\n"
-            "Опиши *бриф / правила* для постов канала.\n"
-            "Бот будет писать *новый пост при каждом запуске* пайплайна.\n\n"
-            "Если канал на RSS/новостях — это не тема поста, а *как писать*: "
-            "тон, табу, длина, без желтухи и т.п. Факты возьмутся из новости.\n\n"
-            "Пример для городского канала: «дружелюбный тон, коротко, "
-            "акцент на хороших новостях, не копируй заголовок СМИ один в один»\n\n"
-            "Пример для обычного канала: «каждый пост — отдельный нетривиальный "
-            "ПП-рецепт с КБЖУ, ингредиентами и шагами приготовления»"
-        )
+        if existing:
+            prompt_text = (
+                "📋 *Генерация поста — AI*\n\n"
+                "*Текущий бриф:*\n"
+                f"{_format_existing_brief(existing)}\n\n"
+                "Отправь *изменённую* версию одним сообщением "
+                "(можно почти как есть, с небольшими правками).\n\n"
+                "Бот будет писать *новый пост при каждом запуске* пайплайна."
+            )
+        else:
+            prompt_text = (
+                "📋 *Генерация поста — AI*\n\n"
+                "Опиши *бриф / правила* для постов канала.\n"
+                "Бот будет писать *новый пост при каждом запуске* пайплайна.\n\n"
+                "Если канал на RSS/новостях — это не тема поста, а *как писать*: "
+                "тон, табу, длина, без желтухи и т.п. Факты возьмутся из новости.\n\n"
+                "Пример для городского канала: «дружелюбный тон, коротко, "
+                "акцент на хороших новостях, не копируй заголовок СМИ один в один»\n\n"
+                "Пример для обычного канала: «каждый пост — отдельный нетривиальный "
+                "ПП-рецепт с КБЖУ, ингредиентами и шагами приготовления»"
+            )
     else:
-        prompt_text = (
-            "📋 *Генерация поста — готовый текст*\n\n"
-            "Отправь готовый текст поста одним сообщением:"
-        )
+        if existing:
+            prompt_text = (
+                "📋 *Генерация поста — готовый текст*\n\n"
+                "*Текущий текст:*\n"
+                f"{_format_existing_brief(existing)}\n\n"
+                "Отправь изменённый текст одним сообщением:"
+            )
+        else:
+            prompt_text = (
+                "📋 *Генерация поста — готовый текст*\n\n"
+                "Отправь готовый текст поста одним сообщением:"
+            )
 
     await max_client.send_message_to_user(
         user_id=max_user_id,
@@ -545,26 +589,20 @@ async def handle_post_callback(callback_data: str, max_user_id: int, max_client,
         redis = await get_redis()
         raw = await redis.get(f"ai_post_gen_review:{max_user_id}")
         mode = "ai"
+        existing = ""
         if raw:
             review = json.loads(raw)
             mode = review.get("mode", "ai")
+            existing = str(review.get("input") or "").strip()
         await redis.delete(f"ai_post_gen_review:{max_user_id}")
-        await claim_text_input(redis, max_user_id, "post_gen", mode, REDIS_TTL)
 
-        builder = InlineKeyboardBuilder()
-        builder.row(("Назад к блокам", "ai:post_gen:cancel"))
-        builder.row(("На главную", "main_menu"))
+        if not existing:
+            fsm = AIStudioFSM()
+            state = await fsm.get_state(max_user_id)
+            block = (state or {}).get("blocks", {}).get("post_gen", {})
+            existing = _current_post_brief(block, mode)
 
-        text = (
-            "📋 Опиши бриф / правила заново:"
-            if mode == "ai"
-            else "📋 Отправь новый текст:"
-        )
-        await max_client.send_message_to_user(
-            user_id=max_user_id,
-            text=text,
-            attachments=[builder.build()],
-        )
+        await _ask_brief(max_user_id, max_client, mode, existing=existing)
         return True
 
     if callback_data == "ai:post_gen:cancel":

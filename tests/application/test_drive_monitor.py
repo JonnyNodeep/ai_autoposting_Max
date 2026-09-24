@@ -18,7 +18,7 @@ def test_normalize_drive_video_defaults():
     assert n["enabled"] is False
     assert n["folder_id"] == ""
     assert n["fixed_caption"] == ""
-    assert n["low_stock_threshold"] == 5
+    assert n["low_stock_threshold"] == 3
     assert n["low_stock_notified_at_remaining"] is None
     assert n["delete_after_publish"] is True
 

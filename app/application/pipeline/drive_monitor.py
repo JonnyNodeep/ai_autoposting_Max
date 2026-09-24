@@ -9,7 +9,7 @@ DEFAULT_DRIVE_VIDEO: dict[str, Any] = {
     "enabled": False,
     "folder_id": "",
     "fixed_caption": "",
-    "low_stock_threshold": 5,
+    "low_stock_threshold": 3,
     "low_stock_notified_at_remaining": None,
     "delete_after_publish": True,
 }
@@ -23,9 +23,9 @@ def normalize_drive_video(raw: Any) -> dict[str, Any]:
     out["folder_id"] = parse_folder_id(folder_raw) or folder_raw
     out["fixed_caption"] = str(src.get("fixed_caption") or "").strip()[:4000]
     try:
-        out["low_stock_threshold"] = max(1, int(src.get("low_stock_threshold") or 5))
+        out["low_stock_threshold"] = max(1, int(src.get("low_stock_threshold") or 3))
     except (TypeError, ValueError):
-        out["low_stock_threshold"] = 5
+        out["low_stock_threshold"] = 3
     notified = src.get("low_stock_notified_at_remaining")
     if notified is None or notified == "":
         out["low_stock_notified_at_remaining"] = None

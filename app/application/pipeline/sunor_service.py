@@ -1,14 +1,17 @@
 """Orchestration for configurable Sunor API music generation (sunor_gen block)."""
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from app.application.pipeline.tale_video import download_url_to_file
+from app.application.pipeline.tts_chunking import concat_audio_to_mp3
 from app.config import settings
 from app.infrastructure.services.openai_client import UPLOAD_DIR
 from app.infrastructure.services.sunor_client import (
@@ -27,6 +30,12 @@ from app.infrastructure.services.sunor_client import (
 
 ESTIMATED_CLIP_SEC = 120
 MAX_EXTEND_STEPS = 8
+CDN_READY_DELAY_S = 2.5
+
+
+async def _await_suno_cdn_ready() -> None:
+    """Brief pause after Sunor poll success before hitting the audio CDN."""
+    await asyncio.sleep(CDN_READY_DELAY_S)
 
 
 class SunorGenerationError(RuntimeError):
@@ -56,30 +65,9 @@ def _max_poll_attempts(poll_timeout: int) -> int:
 
 
 def _normalize_config(config: dict[str, Any]) -> dict[str, Any]:
-    cfg = dict(config or {})
-    mode = str(cfg.get("music_mode") or "inspiration").strip().lower()
-    if mode not in ("inspiration", "custom", "instrumental"):
-        mode = "inspiration"
-    cfg["music_mode"] = mode
-    cfg["make_instrumental"] = bool(cfg.get("make_instrumental", False))
-    cfg["lyrics_enabled"] = bool(cfg.get("lyrics_enabled", False))
-    cfg["extend_enabled"] = bool(cfg.get("extend_enabled", False))
-    cfg["attach_cover_image"] = bool(cfg.get("attach_cover_image", True))
-    try:
-        target = int(cfg.get("target_duration_sec") or 0)
-    except (TypeError, ValueError):
-        target = 0
-    cfg["target_duration_sec"] = max(0, min(600, target))
-    try:
-        continue_at = int(cfg.get("continue_at_sec") or 28)
-    except (TypeError, ValueError):
-        continue_at = 28
-    cfg["continue_at_sec"] = max(1, min(120, continue_at))
-    pick = str(cfg.get("pick_variant") or "first").strip().lower()
-    cfg["pick_variant"] = pick if pick in ("first", "second", "first_ok") else "first"
-    source = str(cfg.get("prompt_source") or "config").strip().lower()
-    cfg["prompt_source"] = source if source in ("config", "story_gen") else "config"
-    return cfg
+    from app.application.pipeline.normalize import _normalize_sunor_gen_config
+
+    return _normalize_sunor_gen_config(config)
 
 
 def build_music_input_from_config(
@@ -144,6 +132,7 @@ async def _create_and_poll_music(
         task_type="music",
         max_attempts=max_attempts,
     )
+    await _await_suno_cdn_ready()
     tracks = list(result.tracks)
     if pick_variant == "first_ok":
         last_exc: Exception | None = None
@@ -244,6 +233,7 @@ async def _download_tracks_with_fallback(
     *,
     preferred: MusicTrack | None = None,
 ) -> tuple[str, MusicTrack]:
+    await _await_suno_cdn_ready()
     ordered: list[MusicTrack] = []
     if preferred is not None:
         ordered.append(preferred)
@@ -283,19 +273,100 @@ async def _download_track(track: MusicTrack) -> str:
     return str(out)
 
 
+async def _download_all_tracks(tracks: list[MusicTrack]) -> list[Path]:
+    await _await_suno_cdn_ready()
+    paths: list[Path] = []
+    for idx, track in enumerate(tracks, start=1):
+        if not (track.audio_url or "").strip():
+            continue
+        out = UPLOAD_DIR / f"sunor_part_{uuid.uuid4().hex[:10]}_{idx}.mp3"
+        await download_url_to_file(track.audio_url, out)
+        paths.append(out)
+    if not paths:
+        raise SunorGenerationError("Sunor не вернул аудио дорожки")
+    return paths
+
+
+async def _generate_merge_4tracks(
+    config: dict[str, Any],
+    *,
+    on_progress: Any | None = None,
+) -> SunorResult:
+    cfg = _normalize_config(config)
+    api_key, base_url, poll_timeout = _api_settings()
+    max_attempts = _max_poll_attempts(poll_timeout)
+    fade_ms = int(cfg.get("merge_crossfade_ms") or 5000)
+
+    if on_progress:
+        await on_progress("🎵 Sunor: генерирую 2 партии для склейки…")
+
+    all_parts: list[Path] = []
+    last_task_id = ""
+    title = str(cfg.get("title") or "").strip()
+
+    for batch in range(2):
+        input_data = build_music_input_from_config(cfg)
+        track, task_id, batch_tracks = await _create_and_poll_music(
+            base_url,
+            api_key,
+            input_data,
+            max_attempts=max_attempts,
+            pick_variant="first",
+        )
+        last_task_id = task_id
+        if len(batch_tracks) >= 2:
+            parts = await _download_all_tracks(batch_tracks[:2])
+        else:
+            parts = await _download_all_tracks([track])
+        all_parts.extend(parts)
+
+    if len(all_parts) < 2:
+        raise SunorGenerationError("Недостаточно дорожек для склейки")
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out = UPLOAD_DIR / f"sunor_merge_{uuid.uuid4().hex[:12]}.mp3"
+    concat_audio_to_mp3(all_parts, out, fade_ms=fade_ms)
+    for part in all_parts:
+        part.unlink(missing_ok=True)
+
+    logger.info(
+        "Sunor merge_4tracks done parts={} fade_ms={} out={}",
+        len(all_parts),
+        fade_ms,
+        out,
+    )
+    return SunorResult(
+        path=str(out),
+        task_id=last_task_id,
+        clip_id="",
+        image_url="",
+        title=title,
+    )
+
+
 async def generate_sunor_track(
     config: dict[str, Any],
     *,
     story_script: str = "",
+    audio_script: str = "",
+    topic_title: str = "",
     on_progress: Any | None = None,
 ) -> SunorResult:
-    """Main entry: lyrics (optional) → music → extend → download."""
+    """Main entry: lyrics (optional) → music → extend/merge → download."""
     cfg = _normalize_config(config)
+    if topic_title:
+        cfg["title"] = topic_title[:120]
+    gen_mode = str(cfg.get("generation_mode") or "single").strip().lower()
+    if gen_mode == "merge_4tracks":
+        return await _generate_merge_4tracks(cfg, on_progress=on_progress)
+
     api_key, base_url, poll_timeout = _api_settings()
     max_attempts = _max_poll_attempts(poll_timeout)
 
     prompt_override: str | None = None
-    if cfg["prompt_source"] == "story_gen" and (story_script or "").strip():
+    if (audio_script or "").strip():
+        prompt_override = audio_script.strip()
+    elif cfg["prompt_source"] == "story_gen" and (story_script or "").strip():
         prompt_override = story_script.strip()
     elif cfg["lyrics_enabled"]:
         lyrics_prompt = str(cfg.get("lyrics_prompt") or "").strip()
@@ -357,10 +428,11 @@ async def generate_sunor_track(
         ) from exc
 
     image_url = track.image_url if cfg["attach_cover_image"] else ""
+    result_title = topic_title or track.title
     return SunorResult(
         path=path,
         task_id=task_id,
         clip_id=track.audio_id,
         image_url=image_url,
-        title=track.title,
+        title=result_title,
     )

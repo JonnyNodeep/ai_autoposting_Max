@@ -49,6 +49,13 @@ def test_safe_unlink_upload_removes_ephemeral_file(upload_root):
     assert not f.exists()
 
 
+def test_is_ephemeral_upload_rejects_meditation_archive(upload_root):
+    archived = upload_root / "meditations" / "12" / "20260903-0430_topic" / "cover.png"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"x")
+    assert is_ephemeral_upload(str(archived)) is False
+
+
 def test_safe_unlink_upload_keeps_logo(upload_root):
     logos = upload_root / "logos"
     logos.mkdir()
@@ -56,6 +63,14 @@ def test_safe_unlink_upload_keeps_logo(upload_root):
     f.write_bytes(b"x")
     safe_unlink_upload(str(f))
     assert f.exists()
+
+
+def test_safe_unlink_upload_keeps_meditation_archive(upload_root):
+    archived = upload_root / "meditations" / "12" / "cover.png"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"x")
+    safe_unlink_upload(str(archived))
+    assert archived.exists()
 
 
 def test_cleanup_pipeline_uploads_removes_ctx_paths(upload_root):
@@ -83,3 +98,29 @@ def test_cleanup_pipeline_uploads_removes_ctx_paths(upload_root):
     assert not video.exists()
     assert not audio.exists()
     assert logo.exists()
+
+
+def test_cleanup_pipeline_uploads_keeps_meditation_archive(upload_root):
+    archived_image = (
+        upload_root / "meditations" / "12" / "20260903-0430_topic" / "cover.png"
+    )
+    archived_audio = (
+        upload_root / "meditations" / "12" / "20260903-0430_topic" / "topic.mp3"
+    )
+    archived_image.parent.mkdir(parents=True)
+    for p in (archived_image, archived_audio):
+        p.write_bytes(b"x")
+
+    ctx = PipelineContext(
+        channel=None,
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=None,
+        image_url=str(archived_image),
+        audio_local_path=str(archived_audio),
+    )
+    cleanup_pipeline_uploads(ctx)
+
+    assert archived_image.exists()
+    assert archived_audio.exists()

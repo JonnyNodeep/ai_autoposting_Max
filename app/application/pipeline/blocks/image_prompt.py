@@ -5,7 +5,11 @@ from typing import Any
 from loguru import logger
 
 from app.application.pipeline.context import PipelineContext
-from app.application.pipeline.normalize import mix_slot_image_addon, resolve_slot_image_addon
+from app.application.pipeline.normalize import (
+    mix_slot_image_addon,
+    resolve_slot_image_addon,
+    resolve_slot_image_ref,
+)
 from app.application.pipeline.recent_topics import (
     fetch_recent_post_topics,
     topic_from_post_text,
@@ -76,14 +80,63 @@ def _news_item_from_ctx(ctx: PipelineContext) -> dict[str, Any] | None:
     return news if isinstance(news, dict) else None
 
 
-def _slot_image_addon_from_ctx(ctx: PipelineContext) -> str:
+def _slot_schedule_from_ctx(ctx: PipelineContext) -> dict[str, Any]:
     meta = ctx.meta if isinstance(ctx.meta, dict) else {}
     schedule = meta.get("pipeline_schedule")
-    if not isinstance(schedule, dict):
-        schedule = {}
-    raw_slot = meta.get("slot_time")
-    slot_time = str(raw_slot).strip() if raw_slot is not None else ""
-    return resolve_slot_image_addon(schedule, slot_time or None)
+    return schedule if isinstance(schedule, dict) else {}
+
+
+def _slot_time_from_ctx(ctx: PipelineContext) -> str | None:
+    meta = ctx.meta if isinstance(ctx.meta, dict) else {}
+    raw = meta.get("slot_time")
+    slot_time = str(raw).strip() if raw is not None else ""
+    return slot_time or None
+
+
+async def _style_ref_description(ctx: PipelineContext) -> str:
+    import base64
+    from pathlib import Path
+
+    schedule = _slot_schedule_from_ctx(ctx)
+    slot_time = _slot_time_from_ctx(ctx)
+    ref_path = resolve_slot_image_ref(schedule, slot_time)
+    if not ref_path:
+        return ""
+    path = Path(ref_path)
+    if not path.is_file():
+        return ""
+    if ctx.openai_client is None:
+        return ""
+    try:
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        return (
+            await ctx.openai_client.analyze_vision(
+                "Опиши визуальный стиль этой картинки для AI-генерации: "
+                "палитра, композиция, настроение, освещение, текстуры. "
+                "Без упоминания текста на изображении. 3–5 предложений.",
+                [b64],
+            )
+        ).strip()
+    except Exception:
+        logger.exception(
+            f"Pipeline image_prompt style ref vision failed run_id={ctx.run_id}"
+        )
+        return ""
+
+
+def _append_style_ref(prompt: str, style_desc: str) -> str:
+    extra = (style_desc or "").strip()
+    if not extra:
+        return prompt
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"Стиль по референсу (обязательно соблюдай):\n{extra}"
+    )
+
+
+def _slot_image_addon_from_ctx(ctx: PipelineContext) -> str:
+    schedule = _slot_schedule_from_ctx(ctx)
+    return resolve_slot_image_addon(schedule, _slot_time_from_ctx(ctx))
 
 
 class ImagePromptBlock:
@@ -150,6 +203,8 @@ class ImagePromptBlock:
             ).strip()
             prompt = f"{instruction}\n\n{topic}" if instruction else topic
             prompt = mix_slot_image_addon(prompt, _slot_image_addon_from_ctx(ctx))
+            style_desc = await _style_ref_description(ctx)
+            prompt = _append_style_ref(prompt, style_desc)
             ctx.meta["image_source"] = "ai"
             ctx.image_prompt = _append_visual_style(prompt, visual_style)
             logger.info(

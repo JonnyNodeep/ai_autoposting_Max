@@ -32,7 +32,7 @@ async def _show_drive_menu(max_user_id: int, max_client, state: dict) -> None:
         "",
         "По расписанию бот берёт следующее неопубликованное видео из папки "
         "и выкладывает в канал.",
-        "Когда останется 5 видео — придёт уведомление в личку.",
+        "При 3, 2, 1 и 0 видео — придут уведомления в личку.",
     ]
     await max_client.send_message_to_user(
         user_id=max_user_id,

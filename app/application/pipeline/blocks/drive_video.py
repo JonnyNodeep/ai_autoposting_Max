@@ -74,12 +74,11 @@ class DriveVideoBlock:
 
         unpublished = [v for v in all_videos if v.file_id not in published_ids]
         remaining = len(unpublished)
-        threshold = int(cfg.get("low_stock_threshold") or 5)
+        threshold = int(cfg.get("low_stock_threshold") or 3)
         notified_at = cfg.get("low_stock_notified_at_remaining")
 
         if (
             remaining <= threshold
-            and remaining > 0
             and notified_at != remaining
             and owner_id
             and ctx.max_client is not None
@@ -103,18 +102,6 @@ class DriveVideoBlock:
         if remaining == 0:
             if isinstance(ctx.meta, dict):
                 ctx.meta["publish_skipped"] = "drive_empty"
-            if owner_id and ctx.max_client is not None:
-                title = (ctx.channel_title or "").strip() or "канал"
-                try:
-                    await ctx.max_client.send_message_to_user(
-                        user_id=owner_id,
-                        text=(
-                            f"Нет видео для публикации в канал «{title}». "
-                            f"Добавьте файлы в папку Google Drive."
-                        ),
-                    )
-                except Exception:
-                    pass
             return
 
         if notified_at is not None and remaining > threshold:

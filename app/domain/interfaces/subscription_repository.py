@@ -8,6 +8,9 @@ class SubscriptionRepository(ABC):
     async def get_active_by_user(self, user_id: int) -> Subscription | None: ...
 
     @abstractmethod
+    async def get_latest_by_user(self, user_id: int) -> Subscription | None: ...
+
+    @abstractmethod
     async def get_by_id(self, subscription_id: int) -> Subscription | None: ...
 
     @abstractmethod

@@ -21,6 +21,17 @@ class SQLAlchemySubscriptionRepository(SubscriptionRepository):
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
 
+    async def get_latest_by_user(self, user_id: int) -> Subscription | None:
+        stmt = (
+            select(SubscriptionModel)
+            .where(SubscriptionModel.user_id == user_id)
+            .order_by(SubscriptionModel.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
     async def get_by_id(self, subscription_id: int) -> Subscription | None:
         stmt = select(SubscriptionModel).where(SubscriptionModel.id == subscription_id)
         result = await self._session.execute(stmt)

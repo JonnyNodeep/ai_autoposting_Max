@@ -8,12 +8,23 @@ from app.application.auth.feature_access import audio_allowed, drive_allowed, vi
 from app.application.pipeline.blocks.registry import BlockRegistry, default_registry
 from app.application.pipeline.context import PipelineContext
 from app.application.pipeline.generate_post import TopicDedupExhausted, generate_post_text
-from app.application.pipeline.normalize import normalize_blocks_config, resolve_post_brief
+from app.application.pipeline.meditation_assets import persist_meditation_assets
+from app.application.pipeline.meditation_presets import slot_msk_label
+from app.application.pipeline.meditation_scripts import generate_meditation_content
+from app.application.pipeline.normalize import (
+    normalize_blocks_config,
+    resolve_post_brief,
+    slot_kind_for_time,
+)
 from app.application.pipeline.recent_topics import (
     fetch_recent_post_topics,
     topic_from_post_text,
 )
-from app.application.pipeline.topic_queue import get_topic_queue_from_post_cfg, pop_topic
+from app.application.pipeline.topic_queue import (
+    get_topic_queue_from_post_cfg,
+    pop_slot_topic,
+    pop_topic,
+)
 from app.application.pipeline.upload_cleanup import cleanup_pipeline_uploads
 
 
@@ -57,6 +68,15 @@ def _channel_owner_db_id(ctx: PipelineContext) -> int | None:
         return None
 
 
+def _uses_meditation_slot_topics(ctx: PipelineContext, meditation: bool) -> bool:
+    if not meditation:
+        return False
+    if getattr(ctx, "target", None) == "channel":
+        return True
+    meta = ctx.meta if isinstance(ctx.meta, dict) else {}
+    return bool(meta.get("meditation_preview"))
+
+
 class PipelineRunner:
     def __init__(self, registry: BlockRegistry | None = None) -> None:
         self._registry = registry or default_registry
@@ -73,6 +93,12 @@ class PipelineRunner:
         try:
             return await self._run_blocks(ctx, blocks_config)
         finally:
+            try:
+                await persist_meditation_assets(ctx)
+            except Exception:
+                logger.exception(
+                    f"Meditation asset persist failed run_id={ctx.run_id}"
+                )
             cleanup_pipeline_uploads(ctx)
 
     async def _run_blocks(self, ctx: PipelineContext, blocks_config: Any) -> PipelineContext:
@@ -116,6 +142,13 @@ class PipelineRunner:
                 if isinstance(ctx.meta, dict):
                     ctx.meta["publish_skipped"] = "topic_dedup"
                 return ctx
+
+        if isinstance(ctx.meta, dict) and ctx.meta.get("publish_skipped"):
+            logger.info(
+                f"Pipeline skipped run_id={ctx.run_id} "
+                f"reason={ctx.meta.get('publish_skipped')!r}"
+            )
+            return ctx
 
         owner_id = _owner_max_user_id(ctx)
 
@@ -220,6 +253,29 @@ class PipelineRunner:
                 f"Topic dedup alert failed owner={owner_id} run_id={ctx.run_id}: {e}"
             )
 
+    async def _alert_slot_topic_exhausted(
+        self,
+        ctx: PipelineContext,
+        *,
+        slot_time: str | None,
+    ) -> None:
+        owner_id = _owner_max_user_id(ctx)
+        if not owner_id or ctx.max_client is None:
+            return
+        title = (ctx.channel_title or "").strip() or "канал"
+        msk = slot_msk_label(slot_time or "") if slot_time else "слот"
+        text = (
+            f"Темы для «{title}» в слоте {msk} МСК закончились.\n"
+            f"Публикация пропущена. Добавьте темы в очередь этого слота."
+        )
+        try:
+            await ctx.max_client.send_message_to_user(user_id=owner_id, text=text)
+        except Exception as e:
+            logger.warning(
+                f"Slot topic exhausted alert failed owner={owner_id} "
+                f"run_id={ctx.run_id}: {e}"
+            )
+
     async def _alert_topic_queue_exhausted(self, ctx: PipelineContext) -> None:
         owner_id = _owner_max_user_id(ctx)
         if not owner_id or ctx.max_client is None:
@@ -283,6 +339,68 @@ class PipelineRunner:
 
             if mode == "ai":
                 brief = resolve_post_brief(schedule, cfg, slot_time)
+                meditation = bool(schedule.get("meditation_pipeline"))
+                slot_kind = slot_kind_for_time(schedule, slot_time) if meditation else ""
+
+                if _uses_meditation_slot_topics(ctx, meditation):
+                    queued_topic, remaining = pop_slot_topic(schedule, slot_time)
+                    if not queued_topic:
+                        await self._alert_slot_topic_exhausted(ctx, slot_time=slot_time)
+                        ctx.meta["publish_skipped"] = "slot_topic_exhausted"
+                        ctx.meta["slot_topic_time"] = slot_time or ""
+                        return
+                    ctx.meta["topic_queue_popped"] = True
+                    ctx.meta["slot_topic_popped"] = True
+                    ctx.meta["slot_topic_time"] = slot_time or ""
+                    ctx.meta["topic_queue_remaining"] = remaining
+                    ctx.meta["topic_queue_used"] = queued_topic
+                    ctx.meta["display_title"] = queued_topic
+                    ctx.meta["topic_queue_block"] = "post_gen"
+                    exhausted = len(remaining) == 0
+                    ctx.meta["topic_queue_exhausted"] = exhausted
+                    if exhausted:
+                        await self._alert_slot_topic_exhausted(ctx, slot_time=slot_time)
+
+                    if brief or queued_topic:
+                        await ctx.notify("📋 Генерирую контент по теме…")
+                        from app.application.pipeline.meditation_post_budget import (
+                            compute_meditation_body_max_chars,
+                            estimate_meditation_footer_reserve,
+                        )
+
+                        schedule_cfg = v2.get("schedule") or {}
+                        footer_reserve = estimate_meditation_footer_reserve(
+                            cfg,
+                            channel_link=ctx.channel_link or "",
+                            channel_title=ctx.channel_title or "",
+                            meditation_pipeline=bool(
+                                schedule_cfg.get("meditation_pipeline")
+                            ),
+                        )
+                        body_max = compute_meditation_body_max_chars(footer_reserve)
+                        post_text, audio_script, display_title = (
+                            await generate_meditation_content(
+                                ctx.openai_client,
+                                brief=brief,
+                                channel_title=ctx.channel_title or "",
+                                topic=queued_topic,
+                                slot_kind=slot_kind or "morning",
+                                bold_headings=bool(cfg.get("bold_headings", True)),
+                                use_emoji=bool(cfg.get("use_emoji", True)),
+                                max_post_chars=body_max,
+                            )
+                        )
+                        ctx.post_text = post_text
+                        ctx.meta["post_topic"] = display_title
+                        ctx.meta["display_title"] = display_title
+                        if audio_script:
+                            ctx.meta["audio_script"] = audio_script
+                        logger.info(
+                            f"Pipeline meditation content topic={display_title!r} "
+                            f"slot_kind={slot_kind!r} run_id={ctx.run_id}"
+                        )
+                        return
+
                 if brief:
                     await ctx.notify("📋 Генерирую текст поста...")
                     chat_id = getattr(ctx.channel, "max_chat_id", None) if ctx.channel else None

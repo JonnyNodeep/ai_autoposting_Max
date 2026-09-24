@@ -445,6 +445,18 @@ def _cdn_download_proxy() -> str | None:
     return None
 
 
+def _cdn_download_proxy_for(url: str) -> str | None:
+    """Suno/Sunor CDN is reached directly; Yandex/RSS proxy breaks these downloads."""
+    host = (httpx.URL(url).host or "").lower()
+    if (
+        host.endswith("suno.ai")
+        or host.endswith("suno.day")
+        or host.endswith("sunor.cc")
+    ):
+        return None
+    return _cdn_download_proxy()
+
+
 def _format_download_error(exc: BaseException) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code if exc.response is not None else "?"
@@ -452,15 +464,19 @@ def _format_download_error(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _cdn_retry_backoff_s(attempt: int) -> float:
+    return min(2 ** (attempt - 1), 8)
+
+
 async def download_url_to_file(
     url: str,
     dest: Path,
     *,
     timeout: float = 180.0,
-    attempts: int = 3,
+    attempts: int = 5,
 ) -> Path:
     """Download CDN audio with browser UA, optional proxy, and retries."""
-    proxy = _cdn_download_proxy()
+    proxy = _cdn_download_proxy_for(url)
     last_exc: BaseException | None = None
     candidate_urls = _cdn_host_alternates(url)
 
@@ -491,7 +507,7 @@ async def download_url_to_file(
                             response=resp,
                         )
                         if attempt < attempts:
-                            await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                            await asyncio.sleep(_cdn_retry_backoff_s(attempt))
                             continue
                         break
                     resp.raise_for_status()
@@ -508,14 +524,14 @@ async def download_url_to_file(
                     )
                     last_exc = exc
                     if attempt < attempts:
-                        await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                        await asyncio.sleep(_cdn_retry_backoff_s(attempt))
                         continue
                     break
                 except httpx.HTTPStatusError as exc:
                     last_exc = exc
                     status = exc.response.status_code if exc.response is not None else None
                     if status in _CDN_RETRYABLE_STATUS and attempt < attempts:
-                        await asyncio.sleep(min(2 ** (attempt - 1), 4))
+                        await asyncio.sleep(_cdn_retry_backoff_s(attempt))
                         continue
                     break
 

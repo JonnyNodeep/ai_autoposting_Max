@@ -5,6 +5,7 @@ from loguru import logger
 from app.application.pipeline.topic_queue import (
     normalize_topic_history,
     normalize_topic_queue,
+    with_preserved_slot_topic_queues,
     with_preserved_topic_history,
     with_preserved_topic_queue,
 )
@@ -125,11 +126,14 @@ async def sync_active_pipeline(
         return False
 
     blocks = state.get("blocks") or {}
+    meditation = bool((blocks.get("schedule") or {}).get("meditation_pipeline"))
     if active.blocks_config:
         if sync_topic_queue:
             blocks = with_preserved_topic_history(blocks, active.blocks_config)
         else:
             blocks = with_preserved_topic_queue(blocks, active.blocks_config)
+            if meditation:
+                blocks = with_preserved_slot_topic_queues(blocks, active.blocks_config)
             owner_id = state.get("user_id")
             if owner_id is not None:
                 try:

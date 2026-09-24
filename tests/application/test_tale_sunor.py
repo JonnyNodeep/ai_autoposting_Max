@@ -214,6 +214,17 @@ async def test_runner_skips_image_blocks_for_sunor_tale(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cdn_download_proxy_skips_suno_hosts(monkeypatch):
+    from app.application.pipeline import tale_video as tv
+
+    monkeypatch.setattr(tv, "_cdn_download_proxy", lambda: "http://proxy:3128")
+    assert tv._cdn_download_proxy_for("https://suno.day/f/x.m4a") is None
+    assert tv._cdn_download_proxy_for("https://cdn1.suno.ai/x.mp3") is None
+    assert tv._cdn_download_proxy_for("https://audio.sunor.cc/audio/x.m4a") is None
+    assert tv._cdn_download_proxy_for("https://example.com/x.mp3") == "http://proxy:3128"
+
+
+@pytest.mark.asyncio
 async def test_download_url_to_file_retries_after_403(monkeypatch, tmp_path):
     from app.application.pipeline import tale_video as tv
 

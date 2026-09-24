@@ -10,6 +10,10 @@ NO_TEXT_SUFFIX = (
     "Без текста, букв, логотипов и надписей на изображении."
 )
 
+LANDSCAPE_16_9_SUFFIX = (
+    "Wide horizontal landscape composition, 16:9 cinematic widescreen framing."
+)
+
 
 def _with_no_text_suffix(prompt: str) -> str:
     base = (prompt or "").rstrip()
@@ -18,6 +22,16 @@ def _with_no_text_suffix(prompt: str) -> str:
     if NO_TEXT_SUFFIX.casefold() in base.casefold():
         return base
     return f"{base}\n\n{NO_TEXT_SUFFIX}"
+
+
+def _with_landscape_suffix(prompt: str) -> str:
+    base = (prompt or "").rstrip()
+    if not base:
+        return LANDSCAPE_16_9_SUFFIX
+    lower = base.casefold()
+    if "16:9" in lower or "widescreen" in lower or "landscape composition" in lower:
+        return base
+    return f"{base}\n\n{LANDSCAPE_16_9_SUFFIX}"
 
 
 class ImageGenBlock:
@@ -53,12 +67,31 @@ class ImageGenBlock:
         if not allow_text:
             prompt = _with_no_text_suffix(prompt)
 
+        aspect_ratio = str(config.get("aspect_ratio") or "1:1").strip()
+        schedule = ctx.meta.get("pipeline_schedule") if isinstance(ctx.meta, dict) else {}
+        if (
+            isinstance(schedule, dict)
+            and schedule.get("meditation_pipeline")
+            and aspect_ratio == "1:1"
+        ):
+            aspect_ratio = "16:9"
+        if aspect_ratio == "16:9":
+            prompt = _with_landscape_suffix(prompt)
+
+        from app.application.pipeline.image_sizes import resolve_image_size
+
+        image_size = resolve_image_size(
+            aspect_ratio,
+            explicit_size=str(config.get("size") or ""),
+        )
+
         await ctx.notify("🧪 Генерирую изображение...")
         logger.info(
             f"Pipeline image_gen: prompt_len={len(prompt)} "
-            f"allow_text={allow_text} run_id={ctx.run_id}"
+            f"allow_text={allow_text} aspect_ratio={aspect_ratio} size={image_size} "
+            f"run_id={ctx.run_id}"
         )
-        image_url = await ctx.openai_client.generate_image(prompt=prompt)
+        image_url = await ctx.openai_client.generate_image(prompt=prompt, size=image_size)
         ctx.image_url = image_url or ""
         logger.info(
             f"Pipeline image_gen: url_preview={(ctx.image_url[:120] if ctx.image_url else 'empty')}"

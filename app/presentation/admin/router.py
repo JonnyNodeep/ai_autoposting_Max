@@ -224,6 +224,8 @@ async def user_detail(
             _flash(request, "Пользователь не найден", "err")
             return RedirectResponse("/admin/users", status_code=303)
         sub = await subs.get_active_by_user(user_id)
+        if sub is None:
+            sub = await subs.get_latest_by_user(user_id)
         pays = await payments.get_by_user(user_id, limit=20)
         api_cost = await UsageStatsRepository(session).get_user_cost(
             user_id, date_from=dt_from, date_to=dt_to
@@ -425,9 +427,9 @@ async def user_extend(
     days_i = max(1, min(365, int(days)))
     async with async_session_factory() as session:
         subs = SQLAlchemySubscriptionRepository(session)
-        sub = await subs.get_active_by_user(user_id)
+        sub = await subs.get_latest_by_user(user_id)
         if sub is None:
-            _flash(request, "Нет активной подписки", "err")
+            _flash(request, "Сначала назначьте тариф", "err")
             return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
         now = datetime.now(UTC)
         base = sub.expires_at if sub.expires_at and sub.expires_at > now else now
@@ -435,7 +437,7 @@ async def user_extend(
             base = base.replace(tzinfo=UTC)
         before = sub.expires_at
         sub.expires_at = base + timedelta(days=days_i)
-        if sub.status == SubscriptionStatus.EXPIRED:
+        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.CANCELLED):
             sub.status = SubscriptionStatus.ACTIVE
         sub.expiry_notified_3d = False
         sub.expiry_notified_1d = False
@@ -465,6 +467,7 @@ async def user_set_plan(
     posts_per_day: int = Form(1),
     reset_quota: str = Form(""),
 ) -> RedirectResponse:
+    from app.application.admin.assign_subscription import AssignSubscriptionUseCase
     from app.application.billing.pricing import calc_quota, quote
     from app.domain.value_objects.subscription_status import SubscriptionStatus
     from app.domain.value_objects.subscription_tier import SubscriptionTier
@@ -476,9 +479,24 @@ async def user_set_plan(
         users = SQLAlchemyUserRepository(session)
         subs = SQLAlchemySubscriptionRepository(session)
         user = await users.get_by_id(user_id)
-        sub = await subs.get_active_by_user(user_id)
+        sub = await subs.get_latest_by_user(user_id)
         if sub is None:
-            _flash(request, "Нет активной подписки", "err")
+            try:
+                uc = AssignSubscriptionUseCase(session, subs, users)
+                sub = await uc.execute(
+                    user_id,
+                    tier,
+                    ppd,
+                    days=30,
+                    reset_quota=bool(reset_quota),
+                    actor="admin",
+                    max_user_id=user.max_user_id if user else None,
+                )
+                await session.commit()
+            except ValueError as exc:
+                _flash(request, str(exc), "err")
+                return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+            _flash(request, f"Тариф назначен → {sub.tier.value} / {sub.posts_per_day} пуб./день")
             return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
         if ppd in high_freq_ppd and not high_freq_allowed(user.max_user_id if user else None):
             _flash(request, "6–8 пуб./день доступны только пользователям из whitelist", "err")
@@ -502,7 +520,7 @@ async def user_set_plan(
         if reset_quota:
             sub.generations_quota = calc_quota(ppd)
             sub.generations_used = 0
-        if sub.status == SubscriptionStatus.EXPIRED:
+        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.CANCELLED):
             sub.status = SubscriptionStatus.ACTIVE
         await subs.update(sub)
         await write_audit(
@@ -523,6 +541,40 @@ async def user_set_plan(
         )
         await session.commit()
     _flash(request, f"Тариф → {sub.tier.value} / {sub.posts_per_day} пуб./день")
+    return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
+
+
+@admin_web_router.post("/users/{user_id}/assign")
+async def user_assign(
+    request: Request,
+    user_id: int,
+    tier: str = Form("solo"),
+    posts_per_day: int = Form(1),
+    days: int = Form(30),
+    reset_quota: str = Form(""),
+) -> RedirectResponse:
+    from app.application.admin.assign_subscription import AssignSubscriptionUseCase
+
+    async with async_session_factory() as session:
+        users = SQLAlchemyUserRepository(session)
+        subs = SQLAlchemySubscriptionRepository(session)
+        try:
+            uc = AssignSubscriptionUseCase(session, subs, users)
+            sub = await uc.execute(
+                user_id,
+                tier,
+                int(posts_per_day),
+                int(days),
+                reset_quota=bool(reset_quota),
+                actor="admin",
+            )
+            await session.commit()
+            _flash(
+                request,
+                f"Назначено: {sub.tier.value} / {sub.posts_per_day} пуб./день → {sub.expires_at}",
+            )
+        except ValueError as exc:
+            _flash(request, str(exc), "err")
     return RedirectResponse(f"/admin/users/{user_id}", status_code=303)
 
 

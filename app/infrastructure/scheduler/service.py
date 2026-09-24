@@ -546,26 +546,41 @@ class SchedulerService:
 
                 if isinstance(ctx.meta, dict) and ctx.meta.get("topic_queue_popped"):
                     from app.application.pipeline.topic_queue import (
+                        apply_slot_topic_remaining,
                         apply_topic_queue_remaining,
                     )
 
                     remaining = ctx.meta.get("topic_queue_remaining") or []
-                    block_type = str(ctx.meta.get("topic_queue_block") or "post_gen")
                     used_topic = str(
                         ctx.meta.get("topic_queue_used")
                         or ctx.meta.get("post_topic")
                         or ""
                     ).strip() or None
-                    run.blocks_config = apply_topic_queue_remaining(
-                        run.blocks_config or {},
-                        remaining,
-                        block_type=block_type,
-                        used_topic=used_topic,
-                    )
-                    logger.info(
-                        f"Pipeline {run_id} topic_queue remaining={len(remaining)} "
-                        f"block={block_type}"
-                    )
+
+                    if ctx.meta.get("slot_topic_popped"):
+                        slot_time = str(ctx.meta.get("slot_topic_time") or "").strip() or None
+                        run.blocks_config = apply_slot_topic_remaining(
+                            run.blocks_config or {},
+                            slot_time,
+                            remaining,
+                            used_topic=used_topic,
+                        )
+                        logger.info(
+                            f"Pipeline {run_id} slot_topic_queue slot={slot_time!r} "
+                            f"remaining={len(remaining)}"
+                        )
+                    else:
+                        block_type = str(ctx.meta.get("topic_queue_block") or "post_gen")
+                        run.blocks_config = apply_topic_queue_remaining(
+                            run.blocks_config or {},
+                            remaining,
+                            block_type=block_type,
+                            used_topic=used_topic,
+                        )
+                        logger.info(
+                            f"Pipeline {run_id} topic_queue remaining={len(remaining)} "
+                            f"block={block_type}"
+                        )
                     try:
                         from app.bot.handlers.ai_studio_pipeline import (
                             apply_topic_queue_to_fsm,
@@ -578,7 +593,7 @@ class SchedulerService:
                             int(run.max_user_id),
                             int(run.channel_id),
                             remaining,
-                            block_type=block_type,
+                            block_type=str(ctx.meta.get("topic_queue_block") or "post_gen"),
                             history=topic_history_from_blocks_config(
                                 run.blocks_config
                             ),
@@ -610,6 +625,179 @@ class SchedulerService:
                 await max_client.close()
             if telegram_client is not None:
                 await telegram_client.close()
+
+    async def run_meditation_preview_step(
+        self,
+        run_id: int,
+        *,
+        slot_time: str,
+    ) -> None:
+        """Full meditation slot to owner DM; consumes slot topic, skips channel publish."""
+        from app.application.pipeline.meditation_presets import slot_msk_label
+
+        max_client: MaxAPIHTTPClient | None = None
+        owner_id: int | None = None
+        channel_title = ""
+        slot_label = slot_msk_label(slot_time) or str(slot_time).strip()
+        try:
+            async with async_session_factory() as session:
+                from app.application.pipeline.context import PipelineContext
+                from app.application.pipeline.runner import PipelineRunner
+                from app.infrastructure.repositories.pipeline_run_repository import (
+                    SQLAPipelineRunRepository,
+                )
+                from app.infrastructure.repositories.channel_repository import (
+                    SQLAlchemyChannelRepository,
+                )
+                from app.infrastructure.services.openai_client import OpenAIService
+
+                repo = SQLAPipelineRunRepository(session)
+                run = await repo.get_by_id(run_id)
+                if not run or run.status.value != "active":
+                    logger.warning(f"Meditation preview skipped: run_id={run_id} not active")
+                    return
+
+                owner_id = int(run.max_user_id) if run.max_user_id else None
+                if not owner_id:
+                    logger.warning(f"Meditation preview skipped: no owner run_id={run_id}")
+                    return
+
+                max_client = MaxAPIHTTPClient()
+                guard = await self._subscription_guard(
+                    session,
+                    user_id=run.user_id,
+                    max_user_id=run.max_user_id,
+                    max_client=max_client,
+                )
+                if guard is None:
+                    return
+
+                from app.application.auth.feature_access import sanitize_premium_blocks_config
+
+                blocks_for_run = sanitize_premium_blocks_config(
+                    run.blocks_config or {},
+                    run.max_user_id,
+                )
+
+                schedule = (blocks_for_run.get("schedule") or {}) if isinstance(
+                    blocks_for_run, dict
+                ) else {}
+                if not schedule.get("meditation_pipeline"):
+                    logger.warning(
+                        f"Meditation preview skipped: not meditation pipeline run_id={run_id}"
+                    )
+                    await max_client.send_message_to_user(
+                        user_id=owner_id,
+                        text="Preview недоступен: пайплайн не медитационный.",
+                    )
+                    return
+
+                ch_repo = SQLAlchemyChannelRepository(session)
+                channel = await ch_repo.get_by_id(run.channel_id)
+                if not channel:
+                    return
+
+                from app.application.channels.sync_channel_meta import sync_channel_meta
+
+                channel = await sync_channel_meta(
+                    channel, max_client, ch_repo, pipe_repo=repo
+                )
+                channel_title = (channel.title or "").strip() or "канал"
+
+                await max_client.send_message_to_user(
+                    user_id=owner_id,
+                    text=(
+                        f"🧪 *Preview медитации* · слот *{slot_label}* MSK\n"
+                        f"Канал: {channel_title}\n"
+                        f"Генерирую пост, картинку и аудио (только вам, не в канал)…"
+                    ),
+                    fmt="markdown",
+                )
+
+                openai_client = OpenAIService()
+                ctx = PipelineContext(
+                    channel=channel,
+                    channel_link=(channel.channel_link or "").strip(),
+                    run_id=run_id,
+                    max_client=max_client,
+                    openai_client=openai_client,
+                    target="user",
+                    target_user_id=owner_id,
+                    channel_title=channel.title or "",
+                )
+                ctx.meta["owner_max_user_id"] = run.max_user_id
+                ctx.meta["meditation_preview"] = True
+                ctx.meta["slot_time"] = str(slot_time).strip()
+
+                ctx = await PipelineRunner().run(ctx, blocks_for_run)
+
+                skipped = (
+                    isinstance(ctx.meta, dict) and ctx.meta.get("publish_skipped")
+                )
+                if skipped:
+                    await max_client.send_message_to_user(
+                        user_id=owner_id,
+                        text=(
+                            f"⚠️ Preview слота *{slot_label}* MSK пропущен: "
+                            f"{ctx.meta.get('publish_skipped')}"
+                        ),
+                        fmt="markdown",
+                    )
+                    await session.commit()
+                    return
+
+                if isinstance(ctx.meta, dict) and ctx.meta.get("slot_topic_popped"):
+                    from app.application.pipeline.topic_queue import (
+                        apply_slot_topic_remaining,
+                    )
+
+                    remaining = ctx.meta.get("topic_queue_remaining") or []
+                    used_topic = str(
+                        ctx.meta.get("topic_queue_used")
+                        or ctx.meta.get("post_topic")
+                        or ""
+                    ).strip() or None
+                    slot_key = str(ctx.meta.get("slot_topic_time") or slot_time).strip()
+                    run.blocks_config = apply_slot_topic_remaining(
+                        run.blocks_config or {},
+                        slot_key,
+                        remaining,
+                        used_topic=used_topic,
+                    )
+                    await repo.update(run)
+                    logger.info(
+                        f"Meditation preview run_id={run_id} slot={slot_key!r} "
+                        f"topic={used_topic!r} remaining={len(remaining)}"
+                    )
+
+                topic = ""
+                if isinstance(ctx.meta, dict):
+                    topic = str(ctx.meta.get("topic_queue_used") or "").strip()
+                await max_client.send_message_to_user(
+                    user_id=owner_id,
+                    text=(
+                        f"✅ Preview слота *{slot_label}* MSK готов.\n"
+                        + (f"Тема: «{topic}»" if topic else "")
+                    ),
+                    fmt="markdown",
+                )
+                await session.commit()
+                logger.info(
+                    f"Meditation preview completed run_id={run_id} slot_time={slot_time!r}"
+                )
+        except Exception as e:
+            logger.exception(f"Meditation preview failed run_id={run_id}: {e}")
+            await self._notify_pipeline_step_failure(
+                run_id=run_id,
+                owner_id=owner_id,
+                channel_title=channel_title,
+                slot_label=slot_label,
+                error=e,
+                max_client=max_client,
+            )
+        finally:
+            if max_client is not None:
+                await max_client.close()
 
     async def _notify_pipeline_step_failure(
         self,

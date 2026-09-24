@@ -426,9 +426,26 @@ class InlineKeyboardBuilder:
                 post_label += " (выкл)"
         builder.row((post_label, "ai:edit:post_gen"))
 
-        queue = list((blocks.get("post_gen") or {}).get("topic_queue") or [])
-        queue_label = f"📚 Темы для постов ({len(queue)})"
-        builder.row((queue_label, "ai:edit:topic_queue"))
+        sched = blocks.get("schedule") or {}
+        meditation = bool(sched.get("meditation_pipeline"))
+        if meditation:
+            slot_queues = sched.get("slot_topic_queues") or {}
+            total_topics = sum(len(v or []) for v in slot_queues.values())
+            builder.row((f"📚 Темы по слотам ({total_topics})", "ai:meditation:topics"))
+            refs = sched.get("slot_image_refs") or {}
+            times = list(sched.get("times") or [])
+            ref_count = sum(
+                1 for t in times if str(refs.get(t) or "").strip()
+            )
+            ref_label = f"🖼 Референсы картинок ({ref_count}/{len(times) or 3})"
+            builder.row((ref_label, "ai:meditation:style_refs"))
+        else:
+            queue = list((blocks.get("post_gen") or {}).get("topic_queue") or [])
+            queue_label = f"📚 Темы для постов ({len(queue)})"
+            builder.row((queue_label, "ai:edit:topic_queue"))
+            builder.row(
+                ("🧘 Preset «Медитационный канал»", "ai:meditation:preset")
+            )
 
         # Schedule after topics — time setup is secondary to content themes.
         builder.row((sched_label, "ai:edit:schedule"))

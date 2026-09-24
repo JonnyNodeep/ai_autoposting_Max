@@ -320,6 +320,38 @@ def test_mix_and_resolve_slot_image_addon():
     assert resolve_slot_image_addon(None, "05:00") == ""
 
 
+def test_meditation_schedule_resolvers():
+    from app.application.pipeline.meditation_presets import MORNING_UTC
+    from app.application.pipeline.normalize import (
+        resolve_slot_image_ref,
+        resolve_slot_sunor_preset,
+        resolve_slot_topic_gen_extra,
+        resolve_slot_topic_queue,
+        slot_kind_for_time,
+    )
+
+    schedule = {
+        "meditation_pipeline": True,
+        "times": [MORNING_UTC, "09:11", "15:11"],
+        "slot_topic_queues": {MORNING_UTC: ["T1"]},
+        "slot_topic_gen_extra": {MORNING_UTC: "extra morning"},
+        "slot_sunor_presets": {
+            MORNING_UTC: {"generation_mode": "single", "slot_kind": "morning"},
+            "15:11": {"generation_mode": "merge_4tracks", "slot_kind": "evening"},
+        },
+        "slot_image_refs": {MORNING_UTC: "/tmp/ref.png"},
+    }
+    assert resolve_slot_topic_queue(schedule, MORNING_UTC) == ["T1"]
+    assert resolve_slot_topic_gen_extra(schedule, MORNING_UTC) == "extra morning"
+    assert slot_kind_for_time(schedule, MORNING_UTC) == "morning"
+    assert slot_kind_for_time(schedule, "15:11") == "evening"
+    preset = resolve_slot_sunor_preset(schedule, MORNING_UTC, {"tags": "base"})
+    assert preset["generation_mode"] == "single"
+    assert preset["slot_kind"] == "morning"
+    assert resolve_slot_image_ref(schedule, MORNING_UTC) == "/tmp/ref.png"
+    assert resolve_slot_topic_queue({"meditation_pipeline": False, "slot_topic_queues": {"x": ["a"]}}, "x") == []
+
+
 def test_resolve_post_brief_append_mixes_general():
     schedule = {
         "per_slot_prompts": True,
@@ -1115,6 +1147,35 @@ async def test_image_gen_keeps_uploads_clean_without_channel_link_arg():
 
 
 @pytest.mark.asyncio
+async def test_image_gen_16_9_passes_landscape_size_and_prompt():
+    calls: list[dict] = []
+
+    class _OAI:
+        async def generate_image(self, prompt: str, *, size: str | None = None):
+            calls.append({"prompt": prompt, "size": size})
+            return "/tmp/wide.png"
+
+    ctx = PipelineContext(
+        channel=object(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=None,
+        openai_client=_OAI(),
+        target="channel",
+        image_prompt="moonlit temple",
+    )
+    await ImageGenBlock().execute(
+        ctx,
+        {"allow_text": False, "aspect_ratio": "16:9"},
+    )
+    assert len(calls) == 1
+    assert calls[0]["size"] == "1536x1024"
+    assert "16:9" in calls[0]["prompt"]
+    assert "Без текста" in calls[0]["prompt"]
+    assert ctx.image_url == "/tmp/wide.png"
+
+
+@pytest.mark.asyncio
 async def test_image_gen_defaults_generate_without_extra_args():
     calls: list[dict] = []
 
@@ -1526,6 +1587,56 @@ async def test_post_gen_sends_image_then_audio_as_two_messages(tmp_path, monkeyp
     ]
     assert not local_audio.exists()
     assert not local_image.exists()
+
+
+@pytest.mark.asyncio
+async def test_post_gen_meditation_skips_share_and_related(tmp_path, monkeypatch):
+    import app.application.pipeline.upload_cleanup as uc
+
+    monkeypatch.setattr(uc, "UPLOAD_DIR", tmp_path)
+    local_audio = tmp_path / "meditation.mp3"
+    local_audio.write_bytes(b"fake-mp3")
+    sent: list[dict] = []
+
+    class _Max:
+        async def upload_file(self, path, kind):
+            return f"{kind}-token"
+
+        async def send_message(self, chat_id, text, attachments=None, fmt=None):
+            sent.append({"text": text, "attachments": attachments})
+
+    class _Channel:
+        max_chat_id = 7
+        telegram_chat_id = None
+        telegram_link = None
+
+    ctx = PipelineContext(
+        channel=_Channel(),  # type: ignore[arg-type]
+        channel_link="",
+        run_id=1,
+        max_client=_Max(),
+        openai_client=None,
+        target="channel",
+        audio_local_path=str(local_audio),
+        post_text="**Храм свечей** — тихий покой.",
+        meta={"pipeline_schedule": {"meditation_pipeline": True}},
+    )
+    await PostGenBlock().execute(
+        ctx,
+        {
+            "enabled": True,
+            "add_channel_link": False,
+            "related_channels_enabled": True,
+            "related_channels": [
+                {"title": "Bio", "link": "https://max.ru/bio", "source": "manual"},
+            ],
+        },
+    )
+    assert len(sent) == 1
+    text = sent[0]["text"]
+    assert text == "**Храм свечей** — тихий покой."
+    assert "Поделитесь" not in text
+    assert RELATED_CHANNELS_INTRO not in text
 
 
 @pytest.mark.asyncio

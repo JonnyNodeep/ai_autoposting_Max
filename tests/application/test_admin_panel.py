@@ -69,6 +69,97 @@ async def test_grant_generations_no_sub():
 
 
 @pytest.mark.asyncio
+async def test_assign_subscription_creates_when_missing():
+    from app.application.admin.assign_subscription import AssignSubscriptionUseCase
+
+    created = Subscription(
+        id=10,
+        user_id=5,
+        tier=SubscriptionTier.CREATOR,
+        status=SubscriptionStatus.ACTIVE,
+        channels_limit=5,
+        posts_per_day=3,
+        generations_quota=90,
+        generations_used=0,
+        expires_at=datetime.now(UTC) + timedelta(days=30),
+    )
+    sub_repo = AsyncMock()
+    sub_repo.get_latest_by_user.return_value = None
+    sub_repo.create.return_value = created
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    uc = AssignSubscriptionUseCase(session, sub_repo)
+    result = await uc.execute(
+        5, "creator", 3, 30, reset_quota=True, actor="admin", max_user_id=111
+    )
+    assert result.tier == SubscriptionTier.CREATOR
+    assert result.status == SubscriptionStatus.ACTIVE
+    assert sub_repo.create.called
+    call_sub = sub_repo.create.await_args.args[0]
+    assert call_sub.channels_limit == 5
+    assert call_sub.posts_per_day == 3
+    assert call_sub.generations_quota == 90
+
+
+@pytest.mark.asyncio
+async def test_assign_subscription_reactivates_expired():
+    from app.application.admin.assign_subscription import AssignSubscriptionUseCase
+
+    expired_at = datetime.now(UTC) - timedelta(days=5)
+    sub = Subscription(
+        id=2,
+        user_id=7,
+        tier=SubscriptionTier.SOLO,
+        status=SubscriptionStatus.EXPIRED,
+        channels_limit=1,
+        posts_per_day=1,
+        generations_quota=30,
+        generations_used=30,
+        expires_at=expired_at,
+        expiry_notified_0d=True,
+    )
+    sub_repo = AsyncMock()
+    sub_repo.get_latest_by_user.return_value = sub
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.flush = AsyncMock()
+
+    before = datetime.now(UTC)
+    uc = AssignSubscriptionUseCase(session, sub_repo)
+    result = await uc.execute(
+        7, "studio", 5, 14, reset_quota=True, actor="admin", max_user_id=222
+    )
+    after = datetime.now(UTC)
+
+    assert result.status == SubscriptionStatus.ACTIVE
+    assert result.tier == SubscriptionTier.STUDIO
+    assert result.posts_per_day == 5
+    assert result.channels_limit == 10
+    assert result.generations_quota == 150
+    assert result.generations_used == 0
+    assert result.expiry_notified_0d is False
+    assert result.expires_at >= before + timedelta(days=14) - timedelta(seconds=2)
+    assert result.expires_at <= after + timedelta(days=14) + timedelta(seconds=2)
+    assert sub_repo.update.called
+
+
+@pytest.mark.asyncio
+async def test_extend_base_uses_max_of_now_and_expires():
+    """Extend/reactivate: days are added from max(now, current expires_at)."""
+    now = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
+    future = now + timedelta(days=10)
+    past = now - timedelta(days=3)
+    days = 30
+
+    base_future = future if future > now else now
+    base_past = past if past > now else now
+    assert base_future + timedelta(days=days) == now + timedelta(days=40)
+    assert base_past + timedelta(days=days) == now + timedelta(days=30)
+
+
+@pytest.mark.asyncio
 async def test_resolve_segment_all_active():
     session = AsyncMock()
 

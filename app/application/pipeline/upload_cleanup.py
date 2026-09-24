@@ -8,8 +8,11 @@ from app.application.pipeline.context import PipelineContext
 from app.infrastructure.services.openai_client import UPLOAD_DIR
 
 
+_PERSISTENT_SUBDIRS = ("logos", "meditations")
+
+
 def is_ephemeral_upload(path: str) -> bool:
-    """True for local files under UPLOAD_DIR, excluding persistent logos."""
+    """True for local files under UPLOAD_DIR, excluding persistent subdirs."""
     raw = (path or "").strip()
     if not raw or raw.startswith("http://") or raw.startswith("https://"):
         return False
@@ -19,12 +22,14 @@ def is_ephemeral_upload(path: str) -> bool:
         resolved.relative_to(root)
     except (ValueError, OSError):
         return False
-    logos = (root / "logos").resolve()
-    try:
-        resolved.relative_to(logos)
-        return False
-    except ValueError:
-        return True
+    for name in _PERSISTENT_SUBDIRS:
+        persistent = (root / name).resolve()
+        try:
+            resolved.relative_to(persistent)
+            return False
+        except ValueError:
+            continue
+    return True
 
 
 def safe_unlink_upload(path: str) -> None:

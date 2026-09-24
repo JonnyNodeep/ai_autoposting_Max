@@ -110,6 +110,16 @@ def build_share_cta_audio(post_text: str) -> str:
     return body + SHARE_CTA_AUDIO
 
 
+def is_meditation_pipeline(ctx: PipelineContext) -> bool:
+    """True when schedule is the meditation multi-slot pipeline."""
+    if not isinstance(ctx.meta, dict):
+        return False
+    schedule = ctx.meta.get("pipeline_schedule")
+    if not isinstance(schedule, dict):
+        return False
+    return bool(schedule.get("meditation_pipeline"))
+
+
 def text_with_telegram_cta(
     max_post_text: str,
     *,
@@ -469,10 +479,11 @@ class PostGenBlock:
                 return
 
         body = post_text
-        if has_audio:
+        meditation = is_meditation_pipeline(ctx)
+        if has_audio and not meditation:
             body = build_share_cta_audio(body)
 
-        if config.get("related_channels_enabled"):
+        if config.get("related_channels_enabled") and not meditation:
             current_id = getattr(ctx.channel, "id", None) if ctx.channel is not None else None
             resolved = await resolve_related_channels(
                 config.get("related_channels") or [],
@@ -490,6 +501,13 @@ class PostGenBlock:
                 title=ctx.channel_title or "канал",
                 personalized=(ctx.target == "user"),
             )
+
+        if meditation:
+            from app.application.pipeline.meditation_post_budget import POST_MAX_PUBLISHED
+            from app.application.pipeline.meditation_scripts import truncate_post
+
+            if len(body) > POST_MAX_PUBLISHED:
+                body = truncate_post(body, max_chars=POST_MAX_PUBLISHED)
 
         post_text = body
         ctx.post_text = post_text

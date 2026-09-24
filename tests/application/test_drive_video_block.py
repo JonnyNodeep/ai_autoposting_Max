@@ -38,7 +38,7 @@ async def test_drive_video_empty_folder_skips(ctx):
         "enabled": True,
         "folder_id": "folder1",
         "fixed_caption": "Caption",
-        "low_stock_threshold": 5,
+        "low_stock_threshold": 3,
     }
 
     with patch(
@@ -62,7 +62,11 @@ async def test_drive_video_empty_folder_skips(ctx):
             await block.execute(ctx, config)
 
     assert ctx.meta.get("publish_skipped") == "drive_empty"
+    assert ctx.meta.get("drive_low_stock_notify") == 0
     assert not ctx.video_local_path
+    ctx.max_client.send_message_to_user.assert_awaited()
+    text = ctx.max_client.send_message_to_user.await_args.kwargs["text"]
+    assert "осталось 0 видео" in text
 
 
 @pytest.mark.asyncio
@@ -75,7 +79,7 @@ async def test_drive_video_downloads_next(ctx, tmp_path, monkeypatch):
         "enabled": True,
         "folder_id": "folder1",
         "fixed_caption": "My caption",
-        "low_stock_threshold": 5,
+        "low_stock_threshold": 3,
         "low_stock_notified_at_remaining": None,
     }
     videos = [
@@ -131,7 +135,7 @@ async def test_drive_video_low_stock_notify(ctx):
         "enabled": True,
         "folder_id": "folder1",
         "fixed_caption": "Cap",
-        "low_stock_threshold": 5,
+        "low_stock_threshold": 3,
         "low_stock_notified_at_remaining": None,
     }
     videos = [
@@ -164,3 +168,81 @@ async def test_drive_video_low_stock_notify(ctx):
 
     assert ctx.meta.get("drive_low_stock_notify") == 3
     ctx.max_client.send_message_to_user.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_drive_video_no_notify_above_threshold(ctx):
+    block = DriveVideoBlock()
+    config = {
+        "enabled": True,
+        "folder_id": "folder1",
+        "fixed_caption": "Cap",
+        "low_stock_threshold": 3,
+        "low_stock_notified_at_remaining": None,
+    }
+    videos = [
+        DriveVideo(f"f{i}", f"v{i}.mp4", "video/mp4", "2026-01-01")
+        for i in range(4)
+    ]
+
+    with patch(
+        "app.application.pipeline.blocks.drive_video.drive_allowed",
+        return_value=True,
+    ), patch(
+        "app.application.pipeline.blocks.drive_video.list_videos",
+        new=AsyncMock(return_value=videos),
+    ), patch(
+        "app.application.pipeline.blocks.drive_video.download_file",
+        new=AsyncMock(return_value=Path("/tmp/x.mp4")),
+    ), patch(
+        "app.application.pipeline.blocks.drive_video.async_session_factory"
+    ) as mock_sf:
+        mock_session = AsyncMock()
+        mock_sf.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_sf.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_repo = MagicMock()
+        mock_repo.get_published_file_ids = AsyncMock(return_value=set())
+        with patch(
+            "app.application.pipeline.blocks.drive_video.SQLADrivePublishedRepository",
+            return_value=mock_repo,
+        ):
+            await block.execute(ctx, config)
+
+    assert ctx.meta.get("drive_low_stock_notify") is None
+    ctx.max_client.send_message_to_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_drive_video_empty_folder_no_repeat_notify(ctx):
+    block = DriveVideoBlock()
+    config = {
+        "enabled": True,
+        "folder_id": "folder1",
+        "fixed_caption": "Caption",
+        "low_stock_threshold": 3,
+        "low_stock_notified_at_remaining": 0,
+    }
+
+    with patch(
+        "app.application.pipeline.blocks.drive_video.drive_allowed",
+        return_value=True,
+    ), patch(
+        "app.application.pipeline.blocks.drive_video.list_videos",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.application.pipeline.blocks.drive_video.async_session_factory"
+    ) as mock_sf:
+        mock_session = AsyncMock()
+        mock_sf.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_sf.return_value.__aexit__ = AsyncMock(return_value=None)
+        mock_repo = MagicMock()
+        mock_repo.get_published_file_ids = AsyncMock(return_value=set())
+        with patch(
+            "app.application.pipeline.blocks.drive_video.SQLADrivePublishedRepository",
+            return_value=mock_repo,
+        ):
+            await block.execute(ctx, config)
+
+    assert ctx.meta.get("publish_skipped") == "drive_empty"
+    assert ctx.meta.get("drive_low_stock_notify") is None
+    ctx.max_client.send_message_to_user.assert_not_awaited()

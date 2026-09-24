@@ -295,6 +295,90 @@ def with_preserved_topic_queue(
     return raw
 
 
+def pop_slot_topic(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None,
+) -> tuple[str | None, list[str]]:
+    from app.application.pipeline.normalize import resolve_slot_topic_queue
+
+    queue = resolve_slot_topic_queue(schedule, slot_time)
+    return pop_topic(queue)
+
+
+def apply_slot_topic_remaining(
+    blocks_config: Any,
+    slot_time: str | None,
+    remaining: list[str],
+    *,
+    used_topic: str | None = None,
+) -> dict[str, Any]:
+    """Update schedule.slot_topic_queues and slot_topic_history in v2 config."""
+    from app.application.pipeline.normalize import (
+        _slot_time_key,
+        is_v2,
+        normalize_blocks_config,
+    )
+
+    raw = copy.deepcopy(blocks_config) if blocks_config is not None else {}
+    if not is_v2(raw):
+        raw = normalize_blocks_config(raw)
+
+    schedule = dict(raw.get("schedule") or {})
+    key = _slot_time_key(schedule, slot_time)
+    if not key:
+        return raw
+
+    queues = dict(schedule.get("slot_topic_queues") or {})
+    queues[key] = normalize_topic_queue(remaining)
+    schedule["slot_topic_queues"] = queues
+
+    if used_topic:
+        history_map = dict(schedule.get("slot_topic_history") or {})
+        history_map[key] = append_topic_history(history_map.get(key), used_topic)
+        schedule["slot_topic_history"] = history_map
+
+    raw["schedule"] = schedule
+    return raw
+
+
+def slot_topic_queues_from_blocks_config(blocks_config: Any) -> dict[str, list[str]]:
+    from app.application.pipeline.normalize import steps_to_ui_dict
+
+    ui = steps_to_ui_dict(blocks_config or {})
+    sched = ui.get("schedule") or {}
+    raw = sched.get("slot_topic_queues") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): normalize_topic_queue(v) for k, v in raw.items()}
+
+
+def slot_topic_history_from_blocks_config(blocks_config: Any) -> dict[str, list[str]]:
+    from app.application.pipeline.normalize import steps_to_ui_dict
+
+    ui = steps_to_ui_dict(blocks_config or {})
+    sched = ui.get("schedule") or {}
+    raw = sched.get("slot_topic_history") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): normalize_topic_history(v) for k, v in raw.items()}
+
+
+def with_preserved_slot_topic_queues(
+    ui_blocks: Any,
+    live_blocks_config: Any,
+) -> dict[str, Any]:
+    raw = copy.deepcopy(ui_blocks) if isinstance(ui_blocks, dict) else {}
+    live_queues = slot_topic_queues_from_blocks_config(live_blocks_config)
+    live_history = slot_topic_history_from_blocks_config(live_blocks_config)
+    sched = dict(raw.get("schedule") or {})
+    if live_queues:
+        sched["slot_topic_queues"] = live_queues
+    if live_history:
+        sched["slot_topic_history"] = live_history
+    raw["schedule"] = sched
+    return raw
+
+
 async def generate_topics_for_brief(
     openai_client: Any,
     *,

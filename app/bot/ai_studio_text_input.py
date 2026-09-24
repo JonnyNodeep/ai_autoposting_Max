@@ -34,7 +34,10 @@ TextInputKind = Literal[
     "sunor_continue",
     "sunor_title",
     "sunor_negative",
-    # Channel setup
+    "meditation_topic_add",
+    "meditation_topic_extra",
+    "meditation_topic_count",
+    "meditation_style_ref",
     "style_prompt",
     "setup_refpost",
     "setup_time",
@@ -75,7 +78,12 @@ _WAIT_KEYS: dict[TextInputKind, str] = {
     "sunor_continue": "ai_sunor_continue_wait",
     "sunor_title": "ai_sunor_title_wait",
     "sunor_negative": "ai_sunor_negative_wait",
+    "meditation_topic_add": "ai_meditation_topic_add_wait",
+    "meditation_topic_extra": "ai_meditation_topic_extra_wait",
+    "meditation_topic_count": "ai_meditation_topic_count_wait",
+    "meditation_style_ref": "ai_meditation_style_ref_wait",
     "style_prompt": "style_prompt",
+    # Channel setup
     "setup_refpost": "setup_refpost",
     "setup_time": "setup_time",
     "setup_slot_custom": "setup_slot_custom",
@@ -135,6 +143,10 @@ STUDIO_TEXT_KINDS: frozenset[TextInputKind] = frozenset(
         "sunor_continue",
         "sunor_title",
         "sunor_negative",
+        "meditation_topic_add",
+        "meditation_topic_extra",
+        "meditation_topic_count",
+        "meditation_style_ref",
     }
 )
 

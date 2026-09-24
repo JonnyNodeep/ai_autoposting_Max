@@ -29,6 +29,9 @@
       <p>Публикаций/день: {{ sub.posts_per_day }}</p>
       <p>Квота: {{ sub.generations_used }} / {{ sub.generations_quota }} (осталось {{ sub.generations_left }})</p>
       <p>Истекает: {{ sub.expires_at }}</p>
+      {% if sub.status.value not in ["trial", "active"] %}
+      <p class="muted">Нет активной подписки — можно продлить или сменить тариф (реактивация).</p>
+      {% endif %}
       <form method="post" action="/admin/users/{{ user.id }}/extend" class="stack" style="margin-top:1rem">
         <label>Продлить (дней)
           <input type="number" name="days" min="1" max="365" value="30" />
@@ -64,7 +67,35 @@
         <button type="submit">Сохранить тариф</button>
       </form>
     {% else %}
-      <p class="muted">Нет активной подписки</p>
+      <p class="muted">Нет подписки — назначьте тариф.</p>
+      <form method="post" action="/admin/users/{{ user.id }}/assign" class="stack" style="margin-top:1rem">
+        <label>Тариф
+          <select name="tier">
+            {% for t in ["solo", "creator", "studio"] %}
+            <option value="{{ t }}">{{ t }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Публикаций/день
+          <select name="posts_per_day">
+            {% set ppd_options = [1, 2, 3, 5] %}
+            {% if high_freq_allowed %}
+            {% set ppd_options = ppd_options + [6, 7, 8] %}
+            {% endif %}
+            {% for n in ppd_options|sort %}
+            <option value="{{ n }}">{{ n }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Срок (дней)
+          <input type="number" name="days" min="1" max="365" value="30" />
+        </label>
+        <label class="row">
+          <input type="checkbox" name="reset_quota" value="1" checked />
+          Сбросить квоту на posts×30
+        </label>
+        <button type="submit">Назначить тариф</button>
+      </form>
     {% endif %}
   </div>
   <div class="card">

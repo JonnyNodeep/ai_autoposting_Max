@@ -176,6 +176,13 @@ async def handle_entry_callback(
         await fsm.set_data(max_user_id, {"step": AIStudioStep.SELECT_FEATURES})
         state = await fsm.get_state(max_user_id)
 
+        sched = (state.get("blocks") or {}).get("schedule") or {}
+        if sched.get("meditation_pipeline"):
+            from app.bot.handlers.ai_studio_meditation import _get_schedule_block
+
+            await _get_schedule_block(max_user_id)
+            state = await fsm.get_state(max_user_id)
+
         await _show_blocks(max_user_id, max_client, state["blocks"], channel_repo)
         return True
 
@@ -336,8 +343,18 @@ async def handle_entry_callback(
                 brief = post.get("user_input", "")
                 bpreview = brief[:200] + "…" if len(brief) > 200 else brief
                 lines.append(f"📋 *Бриф:* {bpreview}")
-                queue = list(post.get("topic_queue") or [])
-                lines.append(f"📚 *Очередь тем:* {len(queue)}")
+                sched = blocks.get("schedule") or {}
+                if sched.get("meditation_pipeline"):
+                    from app.application.pipeline.meditation_presets import slot_msk_label
+
+                    slot_queues = sched.get("slot_topic_queues") or {}
+                    for slot_time in sched.get("times") or []:
+                        n = len(slot_queues.get(slot_time) or [])
+                        msk = slot_msk_label(str(slot_time))
+                        lines.append(f"📚 *Темы {msk} МСК:* {n}")
+                else:
+                    queue = list(post.get("topic_queue") or [])
+                    lines.append(f"📚 *Очередь тем:* {len(queue)}")
             else:
                 post_text = post.get("generated_post", "")
                 ppreview = post_text[:200] + "…" if len(post_text) > 200 else post_text

@@ -18,6 +18,8 @@ POLL_INTERVAL_S = 5.0
 POST_TIMEOUT_S = 120.0
 GET_TIMEOUT_S = 60.0
 MAX_RETRIES_TRANSIENT = 5
+# Rate-limit waits for HTTP 429 (attempts 0..4): 5, 10, 15, 20, 25 minutes.
+RETRY_429_WAITS_S = (5 * 60, 10 * 60, 15 * 60, 20 * 60, 25 * 60)
 TRANSIENT_STATUS_CODES = (429, 500, 502, 503, 504)
 NO_FALLBACK_CREATE_STATUS = frozenset({400, 401, 402, 403})
 
@@ -268,7 +270,7 @@ def pick_track(tracks: list[MusicTrack], variant: str = "first") -> MusicTrack:
     return tracks[0]
 
 
-async def post_create_task(
+async def _post_create_task_once(
     base_url: str,
     api_key: str,
     *,
@@ -276,7 +278,7 @@ async def post_create_task(
     input_data: dict[str, Any],
     timeout: float = POST_TIMEOUT_S,
 ) -> str:
-    """POST /task for any Sunor task type. Returns task_id."""
+    """Single POST /task attempt. Returns task_id."""
     url = base_url.rstrip("/") + SUNOR_TASK_PATH
     body = {
         "model": SUNOR_MODEL,
@@ -341,6 +343,31 @@ async def post_create_task(
             fallbackable=True,
         )
     return task_id.strip()
+
+
+async def post_create_task(
+    base_url: str,
+    api_key: str,
+    *,
+    task_type: str,
+    input_data: dict[str, Any],
+    timeout: float = POST_TIMEOUT_S,
+) -> str:
+    """POST /task for any Sunor task type. Returns task_id.
+
+    Retries transient HTTP statuses (429/5xx) and transport failures.
+    """
+    return await _call_with_retry(
+        _post_create_task_once,
+        base_url,
+        api_key,
+        task_type=task_type,
+        input_data=input_data,
+        timeout=timeout,
+        max_retries=MAX_RETRIES_TRANSIENT,
+        retry_label="Sunor create",
+        is_retryable=_is_retryable_create,
+    )
 
 
 async def post_create_music_task(
@@ -484,45 +511,89 @@ def _is_transient(exc: SunorClientError) -> bool:
     return exc.status_code is not None and exc.status_code in TRANSIENT_STATUS_CODES
 
 
+def _is_retryable_create(exc: Exception) -> bool:
+    """Retry create on gateway blips / rate limits / transport failures only.
+
+    Do not retry 4xx auth/validation or successful responses with bad payloads —
+    those would risk duplicate Sunor tasks.
+    """
+    if isinstance(exc, httpx.ReadTimeout):
+        return True
+    if isinstance(exc, SunorClientError):
+        if _is_transient(exc):
+            return True
+        # Wrapped transport failure from post_create_task_once
+        if exc.status_code is None and "network error" in str(exc).lower():
+            return True
+    return False
+
+
+async def _call_with_retry(
+    fn: Callable[..., Awaitable[Any]],
+    *args: Any,
+    max_retries: int = MAX_RETRIES_TRANSIENT,
+    retry_label: str = "Sunor",
+    is_retryable: Callable[[Exception], bool] | None = None,
+    **kwargs: Any,
+) -> Any:
+    def _default_retryable(exc: Exception) -> bool:
+        if isinstance(exc, httpx.ReadTimeout):
+            return True
+        if isinstance(exc, SunorClientError) and _is_transient(exc):
+            return True
+        return False
+
+    check = is_retryable or _default_retryable
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:
+            if check(e) and attempt < max_retries:
+                status = getattr(e, "status_code", None)
+                if status == 429:
+                    wait = float(
+                        RETRY_429_WAITS_S[min(attempt, len(RETRY_429_WAITS_S) - 1)]
+                    )
+                else:
+                    wait = (2**attempt) + random.uniform(0, 1)
+                logger.warning(
+                    "{} transient error (attempt {}/{}): status={} "
+                    "retrying in {:.1f}s detail={}",
+                    retry_label,
+                    attempt + 1,
+                    max_retries + 1,
+                    status,
+                    wait,
+                    e,
+                )
+                await asyncio.sleep(wait)
+                last_exc = e
+                continue
+            if isinstance(e, httpx.ReadTimeout):
+                raise SunorClientError(
+                    f"{retry_label} ReadTimeout",
+                    fallbackable=True,
+                ) from e
+            raise
+    if last_exc:
+        raise last_exc
+    raise SunorClientError(f"{retry_label} max retries exceeded", fallbackable=True)
+
+
 async def _call_get_with_retry(
     fn: Callable[..., Awaitable[Any]],
     *args: Any,
     max_retries: int = MAX_RETRIES_TRANSIENT,
     **kwargs: Any,
 ) -> Any:
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            return await fn(*args, **kwargs)
-        except SunorClientError as e:
-            if _is_transient(e) and attempt < max_retries:
-                wait = (2**attempt) + random.uniform(0, 1)
-                logger.warning(
-                    "Sunor transient error (attempt {}/{}): status={} retrying in {:.1f}s",
-                    attempt + 1,
-                    max_retries + 1,
-                    e.status_code,
-                    wait,
-                )
-                await asyncio.sleep(wait)
-                last_exc = e
-            else:
-                raise
-        except httpx.ReadTimeout:
-            if attempt < max_retries:
-                wait = (2**attempt) + random.uniform(0, 1)
-                logger.warning(
-                    "Sunor ReadTimeout (attempt {}/{}), retrying in {:.1f}s",
-                    attempt + 1,
-                    max_retries + 1,
-                    wait,
-                )
-                await asyncio.sleep(wait)
-            else:
-                raise SunorClientError("Sunor get task ReadTimeout", fallbackable=True)
-    if last_exc:
-        raise last_exc
-    raise SunorClientError("Sunor max retries exceeded", fallbackable=True)
+    return await _call_with_retry(
+        fn,
+        *args,
+        max_retries=max_retries,
+        retry_label="Sunor get",
+        **kwargs,
+    )
 
 
 @dataclass(frozen=True)

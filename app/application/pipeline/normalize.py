@@ -23,7 +23,7 @@ STEP_ORDER = (
 )
 
 _CONFIG_KEYS = {
-    "image_gen": ("model", "add_watermark", "allow_text"),
+    "image_gen": ("model", "add_watermark", "allow_text", "aspect_ratio", "size"),
     "image_prompt": ("mode", "user_description", "generated_prompt", "instruction", "use_visual_style"),
     "video_gen": (
         "model",
@@ -77,6 +77,9 @@ _CONFIG_KEYS = {
         "continue_prompt",
         "pick_variant",
         "attach_cover_image",
+        "generation_mode",
+        "slot_kind",
+        "merge_crossfade_ms",
     ),
     "post_gen": (
         "mode",
@@ -99,6 +102,12 @@ _CONFIG_KEYS = {
         "slot_prompts",
         "slot_prompt_modes",
         "slot_image_addons",
+        "meditation_pipeline",
+        "slot_topic_queues",
+        "slot_topic_history",
+        "slot_topic_gen_extra",
+        "slot_sunor_presets",
+        "slot_image_refs",
     ),
     "news_rss": (
         "feeds",
@@ -175,6 +184,23 @@ def normalize_related_channels(raw: Any) -> list[dict[str, Any]]:
         if len(out) >= RELATED_CHANNELS_MAX:
             break
     return out
+
+
+def _normalize_image_gen_config(config: dict[str, Any]) -> dict[str, Any]:
+    from app.application.pipeline.image_sizes import normalize_aspect_ratio
+
+    cfg = dict(config or {})
+    cfg["aspect_ratio"] = normalize_aspect_ratio(str(cfg.get("aspect_ratio") or "1:1"))
+    size = str(cfg.get("size") or "").strip()
+    if size:
+        cfg["size"] = size
+    else:
+        cfg.pop("size", None)
+    if "allow_text" in cfg:
+        cfg["allow_text"] = bool(cfg.get("allow_text", True))
+    if "add_watermark" in cfg:
+        cfg["add_watermark"] = bool(cfg.get("add_watermark", False))
+    return cfg
 
 
 def _normalize_post_gen_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -349,7 +375,48 @@ def _normalize_sunor_gen_config(config: dict[str, Any]) -> dict[str, Any]:
     pick = str(cfg.get("pick_variant") or "first").strip().lower()
     cfg["pick_variant"] = pick if pick in ("first", "second", "first_ok") else "first"
     cfg["attach_cover_image"] = bool(cfg.get("attach_cover_image", True))
+    gen_mode = str(cfg.get("generation_mode") or "single").strip().lower()
+    cfg["generation_mode"] = gen_mode if gen_mode in ("single", "merge_4tracks") else "single"
+    kind = str(cfg.get("slot_kind") or "").strip().lower()
+    cfg["slot_kind"] = kind if kind in ("morning", "lunch", "evening", "") else ""
+    try:
+        fade = int(cfg.get("merge_crossfade_ms") or 5000)
+    except (TypeError, ValueError):
+        fade = 5000
+    cfg["merge_crossfade_ms"] = max(0, min(fade, 15000))
     return cfg
+
+
+def _normalize_slot_sunor_preset(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return _normalize_sunor_gen_config(raw)
+
+
+def _normalize_slot_topic_queues(raw: Any, times: list[str]) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    allowed = set(times)
+    out: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        time_key = str(key).strip()
+        if time_key not in allowed:
+            continue
+        out[time_key] = normalize_topic_queue(value)
+    return out
+
+
+def _normalize_slot_topic_history(raw: Any, times: list[str]) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    allowed = set(times)
+    out: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        time_key = str(key).strip()
+        if time_key not in allowed:
+            continue
+        out[time_key] = normalize_topic_history(value)
+    return out
 
 
 def _new_step_id() -> str:
@@ -423,10 +490,43 @@ def _normalize_schedule(raw: Any) -> dict[str, Any]:
         schedule.get("slot_image_addons"),
         times,
     )
+    schedule["meditation_pipeline"] = bool(schedule.get("meditation_pipeline", False))
+    schedule["slot_topic_queues"] = _normalize_slot_topic_queues(
+        schedule.get("slot_topic_queues"),
+        times,
+    )
+    schedule["slot_topic_history"] = _normalize_slot_topic_history(
+        schedule.get("slot_topic_history"),
+        times,
+    )
+    schedule["slot_topic_gen_extra"] = _normalize_slot_prompts(
+        schedule.get("slot_topic_gen_extra"),
+        times,
+    )
+    slot_presets_raw = schedule.get("slot_sunor_presets") or {}
+    slot_presets: dict[str, dict[str, Any]] = {}
+    if isinstance(slot_presets_raw, dict):
+        allowed = set(times)
+        for key, value in slot_presets_raw.items():
+            time_key = str(key).strip()
+            if time_key not in allowed or not isinstance(value, dict):
+                continue
+            slot_presets[time_key] = _normalize_slot_sunor_preset(value)
+    schedule["slot_sunor_presets"] = slot_presets
+    schedule["slot_image_refs"] = _normalize_slot_prompts(
+        schedule.get("slot_image_refs"),
+        times,
+    )
     if not schedule["per_slot_prompts"]:
         schedule["slot_prompts"] = {}
         schedule["slot_prompt_modes"] = {}
         schedule["slot_image_addons"] = {}
+    if not schedule["meditation_pipeline"]:
+        schedule["slot_topic_queues"] = {}
+        schedule["slot_topic_history"] = {}
+        schedule["slot_topic_gen_extra"] = {}
+        schedule["slot_sunor_presets"] = {}
+        schedule["slot_image_refs"] = {}
     return schedule
 
 
@@ -476,6 +576,87 @@ def resolve_slot_image_addon(
         return ""
     addons = schedule.get("slot_image_addons") or {}
     return str(addons.get(slot_time) or "").strip()
+
+
+def _slot_time_key(schedule: dict[str, Any], slot_time: str | None) -> str:
+    if not slot_time:
+        return ""
+    key = str(slot_time).strip()
+    if not key:
+        return ""
+    times = schedule.get("times") or []
+    if key in times:
+        return key
+    return key
+
+
+def resolve_slot_topic_queue(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None = None,
+) -> list[str]:
+    schedule = schedule or {}
+    if not schedule.get("meditation_pipeline") or not slot_time:
+        return []
+    queues = schedule.get("slot_topic_queues") or {}
+    return normalize_topic_queue(queues.get(_slot_time_key(schedule, slot_time)) or [])
+
+
+def resolve_slot_topic_gen_extra(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None = None,
+) -> str:
+    schedule = schedule or {}
+    if not schedule.get("meditation_pipeline") or not slot_time:
+        return ""
+    extras = schedule.get("slot_topic_gen_extra") or {}
+    return str(extras.get(_slot_time_key(schedule, slot_time)) or "").strip()
+
+
+def resolve_slot_topic_history(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None = None,
+) -> list[str]:
+    schedule = schedule or {}
+    if not schedule.get("meditation_pipeline") or not slot_time:
+        return []
+    history = schedule.get("slot_topic_history") or {}
+    return normalize_topic_history(history.get(_slot_time_key(schedule, slot_time)) or [])
+
+
+def resolve_slot_sunor_preset(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None,
+    base_sunor_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge base sunor_gen config with per-slot preset when meditation pipeline is on."""
+    merged = _normalize_sunor_gen_config(dict(base_sunor_cfg or {}))
+    schedule = schedule or {}
+    if not schedule.get("meditation_pipeline") or not slot_time:
+        return merged
+    presets = schedule.get("slot_sunor_presets") or {}
+    slot_preset = presets.get(_slot_time_key(schedule, slot_time))
+    if isinstance(slot_preset, dict) and slot_preset:
+        merged.update(_normalize_slot_sunor_preset(slot_preset))
+    return merged
+
+
+def resolve_slot_image_ref(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None = None,
+) -> str:
+    schedule = schedule or {}
+    if not schedule.get("meditation_pipeline") or not slot_time:
+        return ""
+    refs = schedule.get("slot_image_refs") or {}
+    return str(refs.get(_slot_time_key(schedule, slot_time)) or "").strip()
+
+
+def slot_kind_for_time(
+    schedule: dict[str, Any] | None,
+    slot_time: str | None,
+) -> str:
+    preset = resolve_slot_sunor_preset(schedule, slot_time, {})
+    return str(preset.get("slot_kind") or "").strip().lower()
 
 
 def mix_slot_image_addon(prompt: str, addon: str) -> str:
@@ -543,6 +724,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
                 cfg = _normalize_tts_gen_config(cfg)
             elif step_type == "sunor_gen":
                 cfg = _normalize_sunor_gen_config(cfg)
+            elif step_type == "image_gen":
+                cfg = _normalize_image_gen_config(cfg)
             steps.append(
                 {
                     "id": step.get("id") or _new_step_id(),
@@ -578,6 +761,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
             config = _normalize_tts_gen_config(config)
         elif block_type == "sunor_gen":
             config = _normalize_sunor_gen_config(config)
+        elif block_type == "image_gen":
+            config = _normalize_image_gen_config(config)
         steps.append(
             {
                 "id": _new_step_id(),
@@ -624,6 +809,16 @@ def steps_to_ui_dict(config: Any) -> dict[str, Any]:
         "slot_prompts": dict(sched.get("slot_prompts") or {}),
         "slot_prompt_modes": dict(sched.get("slot_prompt_modes") or {}),
         "slot_image_addons": dict(sched.get("slot_image_addons") or {}),
+        "meditation_pipeline": bool(sched.get("meditation_pipeline", False)),
+        "slot_topic_queues": {
+            k: list(v) for k, v in dict(sched.get("slot_topic_queues") or {}).items()
+        },
+        "slot_topic_history": {
+            k: list(v) for k, v in dict(sched.get("slot_topic_history") or {}).items()
+        },
+        "slot_topic_gen_extra": dict(sched.get("slot_topic_gen_extra") or {}),
+        "slot_sunor_presets": copy.deepcopy(sched.get("slot_sunor_presets") or {}),
+        "slot_image_refs": dict(sched.get("slot_image_refs") or {}),
     }
     ui["news_rss"] = normalize_news_rss(v2.get("news_rss"))
     ui["drive_video"] = normalize_drive_video(v2.get("drive_video"))
