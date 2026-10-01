@@ -51,7 +51,7 @@ async def test_scene_image_retries_on_503_then_succeeds():
         ),
     ):
         mock_settings.openai.api_key = "sk-test"
-        mock_settings.openai.image_model = "gpt-image-2"
+        mock_settings.openai.image_model = "gpt-image-2.5-sunburst"
         mock_settings.openai.tale_image_size = "1536x1024"
         mock_settings.openai.tale_image_quality = "low"
         out = await _generate_scene_image_bytes("sleepy nursery scene")
@@ -81,7 +81,7 @@ async def test_scene_image_no_retry_on_400():
         ),
     ):
         mock_settings.openai.api_key = "sk-test"
-        mock_settings.openai.image_model = "gpt-image-2"
+        mock_settings.openai.image_model = "gpt-image-2.5-sunburst"
         mock_settings.openai.tale_image_size = "1536x1024"
         mock_settings.openai.tale_image_quality = "low"
         with pytest.raises(TaleGenerationError, match="400"):
@@ -112,7 +112,7 @@ async def test_scene_image_exhausts_retries_on_503():
         ),
     ):
         mock_settings.openai.api_key = "sk-test"
-        mock_settings.openai.image_model = "gpt-image-2"
+        mock_settings.openai.image_model = "gpt-image-2.5-sunburst"
         mock_settings.openai.tale_image_size = "1536x1024"
         mock_settings.openai.tale_image_quality = "low"
         with pytest.raises(TaleGenerationError, match="503"):

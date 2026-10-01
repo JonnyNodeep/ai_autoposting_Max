@@ -202,6 +202,23 @@ class ImagePromptBlock:
                 config.get("instruction") or DEFAULT_FROM_TOPIC_INSTRUCTION
             ).strip()
             prompt = f"{instruction}\n\n{topic}" if instruction else topic
+            meta = ctx.meta if isinstance(ctx.meta, dict) else {}
+            short_label = str(meta.get("postcard_short_label") or "").strip()
+            if short_label:
+                from app.application.pipeline.postcards.copy import postcard_image_instruction
+                from app.application.pipeline.postcards.topics import PostcardTopic
+
+                postcard_topic = PostcardTopic(
+                    kind=str(meta.get("postcard_kind") or "daily"),
+                    title=topic,
+                    short_label=short_label,
+                    season_hint=str(meta.get("postcard_season_hint") or ""),
+                    slot_role=str(meta.get("postcard_slot_role") or ""),
+                )
+                prompt = (
+                    f"{postcard_image_instruction(postcard_topic)}\n\n"
+                    f"Тема: {topic}"
+                )
             prompt = mix_slot_image_addon(prompt, _slot_image_addon_from_ctx(ctx))
             style_desc = await _style_ref_description(ctx)
             prompt = _append_style_ref(prompt, style_desc)

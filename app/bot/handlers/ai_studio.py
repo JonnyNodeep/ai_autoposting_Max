@@ -21,6 +21,8 @@ from app.bot.handlers.ai_studio_meditation import (
     handle_meditation_callback,
     handle_meditation_message,
 )
+from app.bot.handlers.ai_studio_postcard import handle_postcard_callback
+from app.bot.handlers.ai_studio_horoscope import handle_horoscope_callback
 from app.bot.handlers.ai_studio_topic_queue import (
     handle_topic_count_message,
     handle_topic_gen_extra_message,
@@ -92,6 +94,14 @@ def register_ai_studio_handlers(dispatcher: UpdateDispatcher) -> None:
                 if await handle_post_callback(callback_data, max_user_id, max_client, channel_repo, session):
                     return
                 if await handle_meditation_callback(
+                    callback_data, max_user_id, max_client, channel_repo, session
+                ):
+                    return
+                if await handle_postcard_callback(
+                    callback_data, max_user_id, max_client, channel_repo, session
+                ):
+                    return
+                if await handle_horoscope_callback(
                     callback_data, max_user_id, max_client, channel_repo, session
                 ):
                     return

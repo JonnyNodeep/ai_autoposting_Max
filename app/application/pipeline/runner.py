@@ -340,7 +340,89 @@ class PipelineRunner:
             if mode == "ai":
                 brief = resolve_post_brief(schedule, cfg, slot_time)
                 meditation = bool(schedule.get("meditation_pipeline"))
+                postcard = bool(schedule.get("postcard_pipeline"))
+                horoscope = bool(schedule.get("horoscope_pipeline"))
                 slot_kind = slot_kind_for_time(schedule, slot_time) if meditation else ""
+
+                if horoscope and brief:
+                    from app.application.pipeline.horoscope.context import (
+                        build_astro_context,
+                        format_astro_context_block,
+                    )
+                    from app.application.pipeline.horoscope_presets import MIDDAY_UTC
+
+                    astro = build_astro_context()
+                    ctx_block = format_astro_context_block(
+                        astro, slot_time=slot_time, midday_utc=MIDDAY_UTC
+                    )
+                    brief = f"{ctx_block}\n\n{brief}"
+                    ctx.meta["horoscope_weekday"] = astro.weekday_ru
+                    ctx.meta["horoscope_moon"] = astro.moon_phase_ru
+                    ctx.meta["horoscope_sign_of_day"] = astro.sign_of_day
+                    if slot_time and str(slot_time).strip() == MIDDAY_UTC:
+                        ctx.meta["horoscope_midday_focus"] = astro.midday_focus
+
+                if postcard:
+                    from app.application.pipeline.postcards.copy import (
+                        generate_postcard_poem,
+                    )
+                    from app.application.pipeline.postcards.topics import (
+                        EVENING_UTC,
+                        MORNING_UTC,
+                        resolve_postcard_topic,
+                        slot_role_for_time,
+                    )
+
+                    role = slot_role_for_time(slot_time)
+                    queued_topic: str | None = None
+                    if role in ("morning", "evening") or str(slot_time or "") in (
+                        MORNING_UTC,
+                        EVENING_UTC,
+                    ):
+                        queued_topic, remaining = pop_slot_topic(schedule, slot_time)
+                        if not queued_topic:
+                            await self._alert_slot_topic_exhausted(
+                                ctx, slot_time=slot_time
+                            )
+                            ctx.meta["publish_skipped"] = "slot_topic_exhausted"
+                            ctx.meta["slot_topic_time"] = slot_time or ""
+                            return
+                        ctx.meta["topic_queue_popped"] = True
+                        ctx.meta["slot_topic_popped"] = True
+                        ctx.meta["slot_topic_time"] = slot_time or ""
+                        ctx.meta["topic_queue_remaining"] = remaining
+                        ctx.meta["topic_queue_used"] = queued_topic
+                        ctx.meta["topic_queue_block"] = "post_gen"
+                        exhausted = len(remaining) == 0
+                        ctx.meta["topic_queue_exhausted"] = exhausted
+                        if exhausted:
+                            await self._alert_slot_topic_exhausted(
+                                ctx, slot_time=slot_time
+                            )
+
+                    topic = resolve_postcard_topic(
+                        schedule,
+                        slot_time,
+                        queued_topic=queued_topic,
+                    )
+                    ctx.meta["postcard_kind"] = topic.kind
+                    ctx.meta["postcard_short_label"] = topic.short_label
+                    ctx.meta["postcard_season_hint"] = topic.season_hint
+                    ctx.meta["postcard_slot_role"] = topic.slot_role
+                    ctx.meta["post_topic"] = topic.title
+                    ctx.meta["display_title"] = topic.title
+                    await ctx.notify("📋 Пишу стих к открытке…")
+                    ctx.post_text = await generate_postcard_poem(
+                        ctx.openai_client,
+                        topic,
+                        channel_title=ctx.channel_title or "",
+                    )
+                    logger.info(
+                        f"Pipeline postcard content topic={topic.title!r} "
+                        f"role={topic.slot_role!r} kind={topic.kind!r} "
+                        f"run_id={ctx.run_id}"
+                    )
+                    return
 
                 if _uses_meditation_slot_topics(ctx, meditation):
                     queued_topic, remaining = pop_slot_topic(schedule, slot_time)
@@ -401,6 +483,64 @@ class PipelineRunner:
                         )
                         return
 
+                podcast = bool(schedule.get("podcast_pipeline"))
+                if podcast:
+                    from app.application.pipeline.podcast_scripts import (
+                        generate_podcast_content,
+                    )
+
+                    queued_topic = None
+                    if getattr(ctx, "target", None) == "channel":
+                        queued_topic, remaining = pop_topic(
+                            get_topic_queue_from_post_cfg(cfg)
+                        )
+                        if not queued_topic:
+                            await self._alert_topic_queue_exhausted(ctx)
+                            ctx.meta["publish_skipped"] = "topic_queue_exhausted"
+                            return
+                        ctx.meta["topic_queue_popped"] = True
+                        ctx.meta["topic_queue_remaining"] = remaining
+                        ctx.meta["topic_queue_used"] = queued_topic
+                        ctx.meta["topic_queue_block"] = "post_gen"
+                        exhausted = len(remaining) == 0
+                        ctx.meta["topic_queue_exhausted"] = exhausted
+                        cfg["topic_queue"] = remaining
+                        step["config"] = cfg
+                        if exhausted:
+                            await self._alert_topic_queue_exhausted(ctx)
+                    else:
+                        # Studio test: use first queued topic without consuming, or brief topic
+                        queue = get_topic_queue_from_post_cfg(cfg)
+                        queued_topic = queue[0] if queue else (brief[:120] or "Тема выпуска")
+
+                    niche = str(schedule.get("podcast_niche") or "").strip().lower()
+                    if niche not in ("psychology", "money", "biohacking", "earnings"):
+                        niche = "psychology"
+
+                    await ctx.notify("📋 Пишу пост и скрипт подкаста…")
+                    post_text, audio_script, display_title = (
+                        await generate_podcast_content(
+                            ctx.openai_client,
+                            brief=brief,
+                            channel_title=ctx.channel_title or "",
+                            topic=str(queued_topic),
+                            niche=niche,  # type: ignore[arg-type]
+                            bold_headings=bool(cfg.get("bold_headings", True)),
+                            use_emoji=bool(cfg.get("use_emoji", True)),
+                        )
+                    )
+                    ctx.post_text = post_text
+                    ctx.meta["post_topic"] = display_title
+                    ctx.meta["display_title"] = display_title
+                    if audio_script:
+                        ctx.meta["audio_script"] = audio_script
+                    logger.info(
+                        f"Pipeline podcast content topic={display_title!r} "
+                        f"niche={niche!r} script_len={len(audio_script)} "
+                        f"run_id={ctx.run_id}"
+                    )
+                    return
+
                 if brief:
                     await ctx.notify("📋 Генерирую текст поста...")
                     chat_id = getattr(ctx.channel, "max_chat_id", None) if ctx.channel else None
@@ -442,6 +582,7 @@ class PipelineRunner:
                         bold_headings=bool(cfg.get("bold_headings", True)),
                         use_emoji=bool(cfg.get("use_emoji", True)),
                         comments_enabled=bool(cfg.get("comments_enabled", False)),
+                        forbid_subscribe_cta=horoscope,
                         recent_topics=recent_topics,
                         approved_topic=queued_topic,
                     )

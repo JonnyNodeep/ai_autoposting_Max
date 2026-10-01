@@ -30,22 +30,20 @@ from app.bot.states.ai_studio import DEFAULT_BLOCKS
 
 
 def test_normalize_legacy_dict_to_v2():
+    from app.application.pipeline.normalize import STEP_ORDER
+
     v2 = normalize_blocks_config(DEFAULT_BLOCKS)
     assert v2["version"] == 2
-    assert [s["type"] for s in v2["steps"]] == [
-        "story_gen",
-        "image_prompt",
-        "image_gen",
-        "video_gen",
-        "tts_gen",
-        "post_gen",
-    ]
+    assert [s["type"] for s in v2["steps"]] == list(STEP_ORDER)
+    assert "motion_fx" in STEP_ORDER
+    assert STEP_ORDER.index("motion_fx") == STEP_ORDER.index("image_gen") + 1
     assert "schedule" in v2
     assert v2["schedule"]["enabled"] is False
     assert v2["schedule"]["per_slot_prompts"] is False
     assert v2["schedule"]["slot_prompts"] == {}
     assert v2["schedule"]["slot_prompt_modes"] == {}
     assert v2["schedule"]["slot_image_addons"] == {}
+    assert v2["schedule"].get("postcard_pipeline") is False
     assert "news_rss" in v2
     assert v2["news_rss"]["enabled"] is False
     assert is_v2(v2)
@@ -62,7 +60,7 @@ def test_ui_roundtrip_preserves_fields():
         },
         "image_gen": {
             "enabled": True,
-            "model": "gpt-image-2",
+            "model": "gpt-image-2.5-sunburst",
             "add_watermark": False,
             "allow_text": False,
         },
@@ -111,7 +109,7 @@ def test_ui_roundtrip_preserves_fields():
     assert back["schedule"]["slot_prompts"] == {"05:00": "Гороскоп на день"}
     assert back["schedule"]["slot_prompt_modes"] == {}
     assert back["schedule"]["slot_image_addons"] == {}
-    assert back["image_gen"]["model"] == "gpt-image-2"
+    assert back["image_gen"]["model"] == "gpt-image-2.5-sunburst"
     assert back["image_gen"]["add_watermark"] is False
     assert back["image_gen"]["allow_text"] is False
     assert back["video_gen"]["model"] == "seedance-1.5-pro"

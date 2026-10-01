@@ -428,23 +428,37 @@ class InlineKeyboardBuilder:
 
         sched = blocks.get("schedule") or {}
         meditation = bool(sched.get("meditation_pipeline"))
-        if meditation:
+        postcard = bool(sched.get("postcard_pipeline"))
+        horoscope = bool(sched.get("horoscope_pipeline"))
+        if meditation or postcard:
             slot_queues = sched.get("slot_topic_queues") or {}
             total_topics = sum(len(v or []) for v in slot_queues.values())
-            builder.row((f"📚 Темы по слотам ({total_topics})", "ai:meditation:topics"))
-            refs = sched.get("slot_image_refs") or {}
-            times = list(sched.get("times") or [])
-            ref_count = sum(
-                1 for t in times if str(refs.get(t) or "").strip()
+            topics_cb = (
+                "ai:meditation:topics" if meditation else "ai:postcard:topics"
             )
-            ref_label = f"🖼 Референсы картинок ({ref_count}/{len(times) or 3})"
-            builder.row((ref_label, "ai:meditation:style_refs"))
+            builder.row((f"📚 Темы по слотам ({total_topics})", topics_cb))
+            if meditation:
+                refs = sched.get("slot_image_refs") or {}
+                times = list(sched.get("times") or [])
+                ref_count = sum(
+                    1 for t in times if str(refs.get(t) or "").strip()
+                )
+                ref_label = f"🖼 Референсы картинок ({ref_count}/{len(times) or 3})"
+                builder.row((ref_label, "ai:meditation:style_refs"))
+        elif horoscope:
+            pass
         else:
             queue = list((blocks.get("post_gen") or {}).get("topic_queue") or [])
             queue_label = f"📚 Темы для постов ({len(queue)})"
             builder.row((queue_label, "ai:edit:topic_queue"))
             builder.row(
                 ("🧘 Preset «Медитационный канал»", "ai:meditation:preset")
+            )
+            builder.row(
+                ("📮 Preset «Живые открытки»", "ai:postcard:preset")
+            )
+            builder.row(
+                ("🔮 Preset «Астро-оракул»", "ai:horoscope:preset")
             )
 
         # Schedule after topics — time setup is secondary to content themes.
@@ -632,7 +646,7 @@ class InlineKeyboardBuilder:
     @classmethod
     def ai_image_model_select(cls, current_model: str) -> dict[str, Any]:
         builder = cls()
-        for model_id, model_name in [("gpt-image-2", "GPT Images 2")]:
+        for model_id, model_name in [("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst")]:
             prefix = "✅ " if model_id == current_model else ""
             builder.row((f"{prefix}{model_name}", f"ai:block:image_gen:model:{model_id}"))
         builder.row(("Назад к блокам", "ai:back_to_blocks"))

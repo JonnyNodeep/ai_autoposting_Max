@@ -344,7 +344,7 @@ async def _run_topic_generation(
     fairy = _audio_fairy_on(state)
     topic_extra = _post_topic_gen_extra(state)
     model = (
-        ((settings.openai.tale_model or "gpt-5.4").strip() or "gpt-5.4")
+        ((settings.openai.tale_model or "gpt-6-sol").strip() or "gpt-6-sol")
         if fairy
         else None
     )

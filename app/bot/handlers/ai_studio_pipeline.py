@@ -126,13 +126,15 @@ async def sync_active_pipeline(
         return False
 
     blocks = state.get("blocks") or {}
-    meditation = bool((blocks.get("schedule") or {}).get("meditation_pipeline"))
+    schedule = blocks.get("schedule") or {}
+    meditation = bool(schedule.get("meditation_pipeline"))
+    postcard = bool(schedule.get("postcard_pipeline"))
     if active.blocks_config:
         if sync_topic_queue:
             blocks = with_preserved_topic_history(blocks, active.blocks_config)
         else:
             blocks = with_preserved_topic_queue(blocks, active.blocks_config)
-            if meditation:
+            if meditation or postcard:
                 blocks = with_preserved_slot_topic_queues(blocks, active.blocks_config)
             owner_id = state.get("user_id")
             if owner_id is not None:
@@ -405,6 +407,7 @@ async def handle_pipeline_callback(
                 on_progress=_on_progress,
                 meta={
                     "news_item": item.to_meta(),
+                    "owner_max_user_id": max_user_id,
                     "image_model_name": _model_name(blocks.get("image_gen", {}).get("model", "")),
                     "preview_keyboard": InlineKeyboardBuilder.ai_studio_blocks(
                         blocks, max_user_id=max_user_id
@@ -512,6 +515,7 @@ async def handle_pipeline_callback(
             channel_title=ch_title,
             on_progress=_on_progress,
             meta={
+                "owner_max_user_id": max_user_id,
                 "image_model_name": _model_name(blocks.get("image_gen", {}).get("model", "")),
                 "preview_keyboard": InlineKeyboardBuilder.ai_studio_blocks(
                     blocks, max_user_id=max_user_id

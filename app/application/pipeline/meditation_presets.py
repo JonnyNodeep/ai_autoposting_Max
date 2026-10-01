@@ -222,6 +222,7 @@ def build_meditation_blocks_ui() -> dict:
             "times": [MORNING_UTC, LUNCH_UTC, EVENING_UTC],
             "per_slot_prompts": True,
             "meditation_pipeline": True,
+            "podcast_pipeline": False,
             "slot_prompts": {
                 MORNING_UTC: (
                     "Утренняя spoken-word аффirmация на русском: материализация мыслей, "

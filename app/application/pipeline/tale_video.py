@@ -91,12 +91,14 @@ class TaleScript:
     caption: str
     story: str
     scenes: list[TaleScene]
+    visual_lock: str = ""
 
     def to_meta(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "caption": self.caption,
             "story": self.story,
+            "visual_lock": self.visual_lock,
             "scenes": [s.to_dict() for s in self.scenes],
         }
 
@@ -118,6 +120,7 @@ class TaleScript:
             caption=str(data.get("caption") or "")[:500],
             story=story,
             scenes=scenes,
+            visual_lock=str(data.get("visual_lock") or "").strip()[:800],
         )
 
 
@@ -252,7 +255,12 @@ def _parse_scenes(raw_scenes: Any, story: str) -> list[TaleScene]:
         except (TypeError, ValueError):
             scene_id = i + 1
         scenes.append(
-            TaleScene(id=scene_id, story_span=span, image_prompt_en=prompt)
+            TaleScene(
+                id=scene_id,
+                story_span=span,
+                image_prompt_en=prompt,
+                hero_in_scene=bool(item.get("hero_in_scene")),
+            )
         )
     if SCENES_MIN <= len(scenes) <= SCENES_MAX:
         return scenes
@@ -264,6 +272,7 @@ def parse_tale_script(raw: str) -> TaleScript:
     story = str(data.get("story") or "").strip()
     if _looks_like_json_blob(story):
         story = ""
+    fields: dict[str, str] = {}
     if not story:
         fields = {
             m.group(1): _unescape_json_string(m.group(2)).strip()
@@ -275,6 +284,9 @@ def parse_tale_script(raw: str) -> TaleScript:
 
     title = str(data.get("title") or "").strip()
     caption = str(data.get("caption") or "").strip()
+    visual_lock = str(data.get("visual_lock") or "").strip()
+    if not visual_lock and fields:
+        visual_lock = (fields.get("visual_lock") or "").strip()
     if not title:
         title = (caption or story.split("\n", 1)[0])[:80] or "Сказка"
     if not caption or _looks_like_json_blob(caption):
@@ -285,7 +297,13 @@ def parse_tale_script(raw: str) -> TaleScript:
         scenes = _fallback_scenes_from_story(story)
     if not scenes:
         raise TaleGenerationError("Не удалось построить сцены сказки")
-    return TaleScript(title=title[:120], caption=caption[:500], story=story, scenes=scenes)
+    return TaleScript(
+        title=title[:120],
+        caption=caption[:500],
+        story=story,
+        scenes=scenes,
+        visual_lock=visual_lock[:800],
+    )
 
 
 def apply_story_length_limit(script: TaleScript) -> TaleScript:
@@ -311,15 +329,16 @@ def apply_story_length_limit(script: TaleScript) -> TaleScript:
         caption=script.caption,
         story=story,
         scenes=scenes,
+        visual_lock=script.visual_lock,
     )
 
 
 async def _llm_chat(messages: list[dict[str, str]], *, model: str) -> str:
     client = AsyncOpenAI(api_key=settings.openai.api_key)
+    # Do not pass temperature: gpt-6-* models only accept the default (1).
     response = await client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.8,
         timeout=180.0,
     )
     return response.choices[0].message.content or ""
@@ -332,7 +351,7 @@ async def generate_tale_script(
     mood: str = FIXED_TALE_MOOD,
     age: str = FIXED_TALE_AGE,
 ) -> TaleScript:
-    model = (settings.openai.tale_model or "gpt-5.4").strip() or "gpt-5.4"
+    model = (settings.openai.tale_model or "gpt-6-sol").strip() or "gpt-6-sol"
     system_prompt = build_story_system_prompt(style=style, mood=mood, age=age)
     user_prompt = build_story_user_prompt(
         topic=topic, style=style, mood=mood, age=age
@@ -632,7 +651,7 @@ async def _generate_scene_image_bytes(prompt: str) -> bytes:
     api_key = (settings.openai.api_key or "").strip()
     if not api_key:
         raise TaleGenerationError("OPENAI_API_KEY не настроен")
-    model = (settings.openai.image_model or "gpt-image-2").strip()
+    model = (settings.openai.image_model or "gpt-image-2.5-sunburst").strip()
     size = (settings.openai.tale_image_size or "1536x1024").strip() or "1536x1024"
     quality = (settings.openai.tale_image_quality or "low").strip() or "low"
     payload = {
@@ -728,7 +747,11 @@ async def generate_scene_images(
 
     async def one(scene: TaleScene, idx: int) -> Path:
         async with sem:
-            prompt = finalize_scene_image_prompt(scene.image_prompt_en, style=style)
+            prompt = finalize_scene_image_prompt(
+                scene.image_prompt_en,
+                style=style,
+                visual_lock=script.visual_lock,
+            )
             image_bytes = await _generate_scene_image_bytes(prompt)
         path = UPLOAD_DIR / f"tale_s{idx}_{uuid.uuid4().hex[:10]}.png"
         path.write_bytes(image_bytes)

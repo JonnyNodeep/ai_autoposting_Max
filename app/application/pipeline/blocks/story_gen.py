@@ -269,7 +269,7 @@ class StoryGenBlock:
         if fmt == "bedtime":
             fmt = "fairy_tale"
 
-        # Fairy-tale / Sunor video path: script + scenes (hard ≤4500, gpt-5.4).
+        # Fairy-tale / Sunor video path: script + scenes (hard ≤4500, OPENAI_TALE_MODEL).
         if fmt == "fairy_tale":
             from app.application.pipeline.tale_video import generate_tale_script
 

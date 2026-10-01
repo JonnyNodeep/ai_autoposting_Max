@@ -42,6 +42,7 @@ async def generate_post_text(
     bold_headings: bool = True,
     use_emoji: bool = True,
     comments_enabled: bool = False,
+    forbid_subscribe_cta: bool = False,
     recent_topics: list[str] | None = None,
     news_item: dict[str, Any] | None = None,
     style_profile: dict[str, Any] | None = None,
@@ -74,6 +75,7 @@ async def generate_post_text(
         bold_headings=bold_headings,
         use_emoji=use_emoji,
         comments_enabled=comments_enabled,
+        forbid_subscribe_cta=forbid_subscribe_cta,
     )
 
     locked = (approved_topic or "").strip()
@@ -257,7 +259,7 @@ async def generate_tale_post_caption(
 
 
 class _PostStyle:
-    __slots__ = ("bold_headings", "use_emoji", "comments_enabled")
+    __slots__ = ("bold_headings", "use_emoji", "comments_enabled", "forbid_subscribe_cta")
 
     def __init__(
         self,
@@ -265,10 +267,41 @@ class _PostStyle:
         bold_headings: bool,
         use_emoji: bool,
         comments_enabled: bool,
+        forbid_subscribe_cta: bool = False,
     ) -> None:
         self.bold_headings = bold_headings
         self.use_emoji = use_emoji
         self.comments_enabled = comments_enabled
+        self.forbid_subscribe_cta = forbid_subscribe_cta
+
+
+def _cta_rule_for_style(style: _PostStyle) -> str:
+    if style.forbid_subscribe_cta:
+        if style.comments_enabled:
+            return (
+                "- Без призыва подписаться на канал и без ссылок. "
+                "- В конце мягко: реакции или «сохраните, если откликнулось»; "
+                "можно предложить написать в комментариях, если уместно"
+            )
+        return (
+            "- Без призыва подписаться на канал и без ссылок. "
+            "- Комментарии НЕ подключены: не проси писать/отвечать. "
+            "- В конце мягко: реакции или «сохраните, если откликнулось» — без подписки"
+        )
+    if style.comments_enabled:
+        return (
+            "- CTA в конце ОБЯЗАТЕЛЬНО: призыв поделиться с друзьями "
+            "(например «поделитесь с друзьями, если пригодилось»); "
+            "можно также предложить реакции, сохранить, написать в комментариях"
+        )
+    return (
+        "- Комментарии в канале НЕ подключены: НЕ задавай вопросов читателям, "
+        "НЕ проси ничего написать / ответить в комментариях / оставить отзыв текстом. "
+        "- CTA в конце ОБЯЗАТЕЛЬНО: призыв поделиться с друзьями "
+        "(например «поделитесь с друзьями, если рецепт пригодился»); "
+        "плюс реакции, если понравилось — например «ставьте реакции, если понравилось»; "
+        "можно сохранить / подписаться"
+    )
 
 
 def _build_avoid_block(
@@ -363,21 +396,7 @@ async def _write_post_for_topic(
         if style.use_emoji
         else "- Не используй эмодзи"
     )
-    if style.comments_enabled:
-        cta_rule = (
-            "- CTA в конце ОБЯЗАТЕЛЬНО: призыв поделиться с друзьями "
-            "(например «поделитесь с друзьями, если пригодилось»); "
-            "можно также предложить реакции, сохранить, написать в комментариях"
-        )
-    else:
-        cta_rule = (
-            "- Комментарии в канале НЕ подключены: НЕ задавай вопросов читателям, "
-            "НЕ проси ничего написать / ответить в комментариях / оставить отзыв текстом. "
-            "- CTA в конце ОБЯЗАТЕЛЬНО: призыв поделиться с друзьями "
-            "(например «поделитесь с друзьями, если рецепт пригодился»); "
-            "плюс реакции, если понравилось — например «ставьте реакции, если понравилось»; "
-            "можно сохранить / подписаться"
-        )
+    cta_rule = _cta_rule_for_style(style)
 
     avoid = _build_avoid_block(recent_topics, rejected_topics=rejected_topics)
     topic_lock = ""

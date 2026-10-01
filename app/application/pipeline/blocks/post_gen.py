@@ -22,6 +22,10 @@ SHARE_CTA_AUDIO = (
     "\n\nПоделитесь с друзьями — пусть и у них будет добрая сказка перед сном"
 )
 
+PODCAST_LISTEN_CTA = (
+    "\n\n🎙 Здесь можно послушать короткий подкаст по этой теме от нашего канала"
+)
+
 RELATED_CHANNELS_INTRO = (
     "У нас есть ещё другие каналы, которые вам могут понравиться:"
 )
@@ -118,6 +122,16 @@ def is_meditation_pipeline(ctx: PipelineContext) -> bool:
     if not isinstance(schedule, dict):
         return False
     return bool(schedule.get("meditation_pipeline"))
+
+
+def is_podcast_pipeline(ctx: PipelineContext) -> bool:
+    """True when schedule is the psychology/money podcast pipeline."""
+    if not isinstance(ctx.meta, dict):
+        return False
+    schedule = ctx.meta.get("pipeline_schedule")
+    if not isinstance(schedule, dict):
+        return False
+    return bool(schedule.get("podcast_pipeline"))
 
 
 def text_with_telegram_cta(
@@ -480,7 +494,8 @@ class PostGenBlock:
 
         body = post_text
         meditation = is_meditation_pipeline(ctx)
-        if has_audio and not meditation:
+        podcast = is_podcast_pipeline(ctx)
+        if has_audio and not meditation and not podcast:
             body = build_share_cta_audio(body)
 
         if config.get("related_channels_enabled") and not meditation:
@@ -495,12 +510,14 @@ class PostGenBlock:
 
         body_without_cta = body
         add_link = bool(config.get("add_channel_link") and ctx.channel_link)
-        if add_link:
+        if add_link and not podcast:
             body = body + build_subscribe_cta(
                 ctx.channel_link,
                 title=ctx.channel_title or "канал",
                 personalized=(ctx.target == "user"),
             )
+        if podcast and has_audio:
+            body = body + PODCAST_LISTEN_CTA
 
         if meditation:
             from app.application.pipeline.meditation_post_budget import POST_MAX_PUBLISHED
@@ -609,7 +626,7 @@ class PostGenBlock:
             tg_text = text_with_telegram_cta(
                 post_text,
                 body_without_cta=body_without_cta,
-                add_channel_link=add_link,
+                add_channel_link=bool(add_link and not podcast),
                 max_link=ctx.channel_link or "",
                 telegram_link=getattr(ctx.channel, "telegram_link", None),
                 channel_title=ctx.channel_title or "канал",

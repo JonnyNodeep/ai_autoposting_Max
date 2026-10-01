@@ -13,6 +13,14 @@ from app.application.pipeline.sunor_service import (
 )
 
 
+def _is_podcast_pipeline(ctx: PipelineContext) -> bool:
+    meta = ctx.meta if isinstance(ctx.meta, dict) else {}
+    schedule = meta.get("pipeline_schedule")
+    if not isinstance(schedule, dict):
+        return False
+    return bool(schedule.get("podcast_pipeline"))
+
+
 class SunorGenBlock:
     type_id = "sunor_gen"
 
@@ -27,14 +35,29 @@ class SunorGenBlock:
             return
 
         meta = ctx.meta if isinstance(ctx.meta, dict) else {}
-        schedule = meta.get("pipeline_schedule") if isinstance(meta.get("pipeline_schedule"), dict) else {}
+        schedule = (
+            meta.get("pipeline_schedule")
+            if isinstance(meta.get("pipeline_schedule"), dict)
+            else {}
+        )
         slot_time = str(meta.get("slot_time") or "").strip() or None
         merged_cfg = resolve_slot_sunor_preset(schedule, slot_time, config)
 
         topic_title = str(
-            meta.get("display_title") or meta.get("post_topic") or merged_cfg.get("title") or ""
+            meta.get("display_title")
+            or meta.get("post_topic")
+            or merged_cfg.get("title")
+            or ""
         ).strip()
         audio_script = str(meta.get("audio_script") or "").strip()
+        podcast = _is_podcast_pipeline(ctx)
+
+        if podcast and not audio_script:
+            logger.warning(
+                f"sunor_gen podcast soft-skip: empty audio_script run_id={ctx.run_id}"
+            )
+            await ctx.notify("🎙 Скрипт подкаста пуст — публикую только пост.")
+            return
 
         if topic_title:
             merged_cfg["title"] = topic_title[:120]
@@ -54,6 +77,13 @@ class SunorGenBlock:
             )
         except SunorGenerationError as exc:
             logger.error(f"sunor_gen failed run_id={ctx.run_id}: {exc}")
+            if podcast:
+                await ctx.notify(
+                    "🎙 Не удалось озвучить подкаст — публикую только пост с картинкой."
+                )
+                ctx.audio_local_path = ""
+                ctx.audio_token = ""
+                return
             raise
 
         final_path = result.path

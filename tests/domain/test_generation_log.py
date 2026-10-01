@@ -19,7 +19,7 @@ def test_generation_log_fields():
         channel_id=10,
         operation="generate_post",
         tokens_used=1500,
-        model="gpt-5.5-mini",
+        model="gpt-6-luna",
         estimated_cost=0.012,
     )
     assert log.operation == "generate_post"
@@ -28,18 +28,18 @@ def test_generation_log_fields():
 
 
 def test_estimate_cost_text_model():
-    cost = estimate_cost("gpt-5.5-mini", 1_000_000)
-    expected = (0.15 + 0.60) / 2
+    cost = estimate_cost("gpt-6-luna", 1_000_000)
+    expected = (0.10 + 0.50) / 2
     assert abs(cost - expected) < 0.01
 
 
 def test_estimate_cost_image_model():
-    cost = estimate_cost("imagen-1.5", 0, "image", image_quality="medium")
+    cost = estimate_cost("gpt-image-2.5-sunburst", 0, "image", image_quality="medium")
     assert cost == 0.04
 
 
 def test_estimate_cost_image_quality_high():
-    cost = estimate_cost("imagen-1.5", 0, "image", image_quality="high")
+    cost = estimate_cost("gpt-image-2.5-sunburst", 0, "image", image_quality="high")
     assert cost == 0.08
 
 
@@ -50,13 +50,14 @@ def test_estimate_cost_tts():
 
 def test_estimate_cost_unknown_text_uses_default():
     cost = estimate_cost("unknown-model", 1_000_000)
-    expected = (0.15 + 0.60) / 2
+    expected = (0.10 + 0.50) / 2
     assert abs(cost - expected) < 0.01
 
 
 def test_model_costs_defined():
-    assert "gpt-5.5-mini" in MODEL_COSTS
-    assert "imagen-1.5" in MODEL_COSTS
+    assert "gpt-6-luna" in MODEL_COSTS
+    assert "gpt-6-sol" in MODEL_COSTS
+    assert "gpt-image-2.5-sunburst" in MODEL_COSTS
     assert "gpt-4o-mini-tts" in MODEL_COSTS
 
 

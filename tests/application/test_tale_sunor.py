@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from app.application.pipeline.tale_prompts import (
+    IMAGE_CONTINUITY_SUFFIX,
+    SCENES_MIN,
     STORY_TARGET_CHARS,
+    build_story_shorten_user_prompt,
+    build_story_system_prompt,
     build_sunor_tags,
+    finalize_scene_image_prompt,
     wrap_story_for_sunor,
 )
 from app.application.pipeline.tale_video import (
@@ -39,6 +44,7 @@ def test_apply_story_length_limit_rebuilds_scenes():
         title="Т",
         caption="К",
         story=story,
+        visual_lock="cream rabbit in blue scarf",
         scenes=[
             TaleScene(id=i, story_span=f"span {i}", image_prompt_en="p")
             for i in range(1, 7)
@@ -46,13 +52,35 @@ def test_apply_story_length_limit_rebuilds_scenes():
     )
     limited = apply_story_length_limit(script)
     assert len(limited.story) <= STORY_TARGET_CHARS
-    assert len(limited.scenes) >= 6
+    assert len(limited.scenes) >= SCENES_MIN
+    assert limited.visual_lock == "cream rabbit in blue scarf"
 
 
 def test_parse_tale_script_and_scenes():
+    lock = "same sleepy pastel style; small cream rabbit in a blue scarf"
     raw = (
         '{"title":"Луна","caption":"Добрая сказка.",'
-        '"story":"Жил кот. Он спал. Потом утро.",'
+        f'"story":"Жил кот. Он спал. Потом утро.","visual_lock":"{lock}",'
+        '"scenes":['
+        + ",".join(
+            f'{{"id":{i},"story_span":"часть {i}","image_prompt_en":"{lock}; cat pose {i}",'
+            f'"hero_in_scene":true}}'
+            for i in range(1, SCENES_MIN + 1)
+        )
+        + "]}"
+    )
+    script = parse_tale_script(raw)
+    assert script.title == "Луна"
+    assert len(script.scenes) == SCENES_MIN
+    assert script.visual_lock == lock
+    assert script.scenes[0].hero_in_scene is True
+    assert "кот" in script.story.lower() or "Жил" in script.story
+
+
+def test_parse_tale_script_few_scenes_falls_back_to_min():
+    raw = (
+        '{"title":"Луна","caption":"Добрая сказка.",'
+        '"story":"Жил кот. Он спал. Потом утро. Снова спал.",'
         '"scenes":['
         + ",".join(
             f'{{"id":{i},"story_span":"часть {i}","image_prompt_en":"cat {i}"}}'
@@ -61,15 +89,69 @@ def test_parse_tale_script_and_scenes():
         + "]}"
     )
     script = parse_tale_script(raw)
-    assert script.title == "Луна"
-    assert len(script.scenes) == 6
-    assert "кот" in script.story.lower() or "Жил" in script.story
+    assert len(script.scenes) >= SCENES_MIN
 
 
 def test_scenes_from_story_fallback():
-    story = "\n\n".join(f"Абзац номер {i}." for i in range(8))
-    scenes = scenes_from_story(story, n=6)
-    assert len(scenes) == 6
+    story = "\n\n".join(f"Абзац номер {i}." for i in range(12))
+    scenes = scenes_from_story(story, n=SCENES_MIN)
+    assert len(scenes) == SCENES_MIN
+
+
+def test_story_system_prompt_craft_and_scenes():
+    prompt = build_story_system_prompt()
+    assert "visual_lock" in prompt
+    assert f"от {SCENES_MIN} до" in prompt
+    assert "герой → простое желание" in prompt
+    assert "тихо" in prompt.lower()
+    assert "1–2 раз" in prompt or "1-2 раз" in prompt
+    assert "тише и соннее" not in prompt
+    assert "тише и спокойнее" not in prompt
+
+
+def test_story_shorten_keeps_finale_and_antistamp():
+    prompt = build_story_shorten_user_prompt(
+        topic="зайчик", title="Заяц", story_len=9000
+    )
+    assert "полный финал" in prompt
+    assert "visual_lock" in prompt
+    assert "тихо" in prompt.lower()
+
+
+def test_finalize_scene_image_prompt_includes_lock_and_continuity():
+    lock = "small cream rabbit in a blue scarf, soft moonlight palette"
+    out = finalize_scene_image_prompt(
+        "rabbit sitting by a window",
+        visual_lock=lock,
+    )
+    assert lock in out
+    assert "rabbit sitting by a window" in out
+    assert "same character design" in out.lower()
+    assert "16:9" in out
+    assert IMAGE_CONTINUITY_SUFFIX.split(",")[0].lower() in out.lower()
+
+
+def test_finalize_scene_image_prompt_without_lock_still_has_continuity():
+    out = finalize_scene_image_prompt("a cozy bed")
+    assert "a cozy bed" in out or "Scene: a cozy bed" in out
+    assert "same character design" in out.lower()
+    assert "consistent character design" in out.lower()
+
+
+def test_tale_script_meta_roundtrip_visual_lock():
+    script = TaleScript(
+        title="Т",
+        caption="К",
+        story="Текст",
+        visual_lock="orange fox, green vest",
+        scenes=[
+            TaleScene(id=1, story_span="a", image_prompt_en="p", hero_in_scene=True)
+        ],
+    )
+    restored = TaleScript.from_meta(script.to_meta())
+    assert restored is not None
+    assert restored.visual_lock == "orange fox, green vest"
+    assert restored.scenes[0].hero_in_scene is True
 
 
 def test_sunor_tags_fixed_scenario():
@@ -126,9 +208,10 @@ async def test_tts_gen_sunor_sets_video_path(monkeypatch, tmp_path):
         title="Т",
         caption="Капшн",
         story="Жил-был зайчик.",
+        visual_lock="cream rabbit",
         scenes=[
             TaleScene(id=i, story_span=f"s{i}", image_prompt_en="p")
-            for i in range(1, 7)
+            for i in range(1, SCENES_MIN + 1)
         ],
     )
     ctx = PipelineContext(

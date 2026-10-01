@@ -52,12 +52,12 @@ class OpenAISettings(BaseSettings):
 
     api_key: str = Field(default="", alias="OPENAI_API_KEY")
     admin_api_key: str = Field(default="", alias="OPENAI_ADMIN_API_KEY")
-    text_model: str = Field(default="gpt-5.5-mini", alias="OPENAI_TEXT_MODEL")
-    image_model: str = Field(default="imagen-1.5", alias="OPENAI_IMAGE_MODEL")
+    text_model: str = Field(default="gpt-6-luna", alias="OPENAI_TEXT_MODEL")
+    image_model: str = Field(default="gpt-image-2.5-sunburst", alias="OPENAI_IMAGE_MODEL")
     image_quality: str = Field(default="medium", alias="OPENAI_IMAGE_QUALITY")
     search_model: str = Field(default="gpt-4o-mini-search-preview", alias="OPENAI_SEARCH_MODEL")
     tts_model: str = Field(default="gpt-4o-mini-tts", alias="OPENAI_TTS_MODEL")
-    tale_model: str = Field(default="gpt-5.4", alias="OPENAI_TALE_MODEL")
+    tale_model: str = Field(default="gpt-6-sol", alias="OPENAI_TALE_MODEL")
     tale_image_size: str = Field(default="1536x1024", alias="TALE_IMAGE_SIZE")
     tale_image_quality: str = Field(default="low", alias="TALE_IMAGE_QUALITY")
 

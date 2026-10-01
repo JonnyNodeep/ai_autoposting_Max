@@ -7,15 +7,22 @@ from app.infrastructure.database.session import async_session_factory
 
 # Approximate USD list prices (org invoice may differ slightly).
 MODEL_COSTS: dict[str, dict] = {
+    "gpt-6-luna": {"input_per_1m": 0.10, "output_per_1m": 0.50},
+    "gpt-6-sol": {"input_per_1m": 2.00, "output_per_1m": 10.00},
     "gpt-5.5-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60},
+    "gpt-5.4-mini": {"input_per_1m": 0.75, "output_per_1m": 4.50},
     "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60},
     "gpt-4o-mini-search-preview": {"input_per_1m": 0.15, "output_per_1m": 0.60},
+    "gpt-image-2.5-sunburst": {
+        "per_image": {"low": 0.02, "medium": 0.04, "high": 0.08}
+    },
+    "gpt-image-2": {"per_image": {"low": 0.02, "medium": 0.04, "high": 0.08}},
     "imagen-1.5": {"per_image": {"low": 0.02, "medium": 0.04, "high": 0.08}},
     "gpt-4o-mini-tts": {"per_1m_chars": 12.0},
     "gpt-4o-tts": {"per_1m_chars": 15.0},
 }
 
-_DEFAULT_TEXT = {"input_per_1m": 0.15, "output_per_1m": 0.60}
+_DEFAULT_TEXT = {"input_per_1m": 0.10, "output_per_1m": 0.50}
 _DEFAULT_IMAGE = 0.04
 _DEFAULT_TTS_PER_1M = 12.0
 
@@ -67,7 +74,7 @@ class GenerationLogService:
         user_id: int,
         operation: str,
         tokens_used: int = 0,
-        model: str = "gpt-5.5-mini",
+        model: str = "gpt-6-luna",
         channel_id: int | None = None,
         *,
         chars: int = 0,

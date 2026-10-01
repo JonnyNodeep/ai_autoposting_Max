@@ -15,6 +15,7 @@ STEP_ORDER = (
     "story_gen",
     "image_prompt",
     "image_gen",
+    "motion_fx",
     "video_gen",
     "tts_gen",
     "sunor_gen",
@@ -25,6 +26,10 @@ STEP_ORDER = (
 _CONFIG_KEYS = {
     "image_gen": ("model", "add_watermark", "allow_text", "aspect_ratio", "size"),
     "image_prompt": ("mode", "user_description", "generated_prompt", "instruction", "use_visual_style"),
+    "motion_fx": (
+        "duration_s",
+        "preset_group",
+    ),
     "video_gen": (
         "model",
         "duration",
@@ -103,6 +108,10 @@ _CONFIG_KEYS = {
         "slot_prompt_modes",
         "slot_image_addons",
         "meditation_pipeline",
+        "postcard_pipeline",
+        "podcast_pipeline",
+        "horoscope_pipeline",
+        "podcast_niche",
         "slot_topic_queues",
         "slot_topic_history",
         "slot_topic_gen_extra",
@@ -200,6 +209,18 @@ def _normalize_image_gen_config(config: dict[str, Any]) -> dict[str, Any]:
         cfg["allow_text"] = bool(cfg.get("allow_text", True))
     if "add_watermark" in cfg:
         cfg["add_watermark"] = bool(cfg.get("add_watermark", False))
+    return cfg
+
+
+def _normalize_motion_fx_config(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = dict(config or {})
+    try:
+        duration = float(cfg.get("duration_s") or 4)
+    except (TypeError, ValueError):
+        duration = 4.0
+    cfg["duration_s"] = max(3.0, min(5.0, duration))
+    group = str(cfg.get("preset_group") or "auto").strip().lower() or "auto"
+    cfg["preset_group"] = group
     return cfg
 
 
@@ -491,6 +512,32 @@ def _normalize_schedule(raw: Any) -> dict[str, Any]:
         times,
     )
     schedule["meditation_pipeline"] = bool(schedule.get("meditation_pipeline", False))
+    schedule["postcard_pipeline"] = bool(schedule.get("postcard_pipeline", False))
+    schedule["podcast_pipeline"] = bool(schedule.get("podcast_pipeline", False))
+    schedule["horoscope_pipeline"] = bool(schedule.get("horoscope_pipeline", False))
+    niche = str(schedule.get("podcast_niche") or "").strip().lower()
+    schedule["podcast_niche"] = (
+        niche if niche in ("psychology", "money", "biohacking", "earnings") else ""
+    )
+    # Mutually exclusive specialty pipelines
+    if schedule["postcard_pipeline"] and schedule["meditation_pipeline"]:
+        schedule["meditation_pipeline"] = False
+    if schedule["podcast_pipeline"]:
+        if schedule["meditation_pipeline"]:
+            schedule["meditation_pipeline"] = False
+        if schedule["postcard_pipeline"]:
+            schedule["postcard_pipeline"] = False
+        if schedule["horoscope_pipeline"]:
+            schedule["horoscope_pipeline"] = False
+    if schedule["horoscope_pipeline"]:
+        if schedule["meditation_pipeline"]:
+            schedule["meditation_pipeline"] = False
+        if schedule["postcard_pipeline"]:
+            schedule["postcard_pipeline"] = False
+        if schedule["podcast_pipeline"]:
+            schedule["podcast_pipeline"] = False
+    if not schedule["podcast_pipeline"]:
+        schedule["podcast_niche"] = ""
     schedule["slot_topic_queues"] = _normalize_slot_topic_queues(
         schedule.get("slot_topic_queues"),
         times,
@@ -521,13 +568,20 @@ def _normalize_schedule(raw: Any) -> dict[str, Any]:
         schedule["slot_prompts"] = {}
         schedule["slot_prompt_modes"] = {}
         schedule["slot_image_addons"] = {}
-    if not schedule["meditation_pipeline"]:
+    uses_slot_topics = schedule["meditation_pipeline"] or schedule["postcard_pipeline"]
+    if not uses_slot_topics:
         schedule["slot_topic_queues"] = {}
         schedule["slot_topic_history"] = {}
         schedule["slot_topic_gen_extra"] = {}
+    if not schedule["meditation_pipeline"]:
         schedule["slot_sunor_presets"] = {}
         schedule["slot_image_refs"] = {}
     return schedule
+
+
+def uses_slot_topic_queues(schedule: dict[str, Any] | None) -> bool:
+    schedule = schedule or {}
+    return bool(schedule.get("meditation_pipeline") or schedule.get("postcard_pipeline"))
 
 
 def mix_slot_brief(base: str, addon: str) -> str:
@@ -595,7 +649,7 @@ def resolve_slot_topic_queue(
     slot_time: str | None = None,
 ) -> list[str]:
     schedule = schedule or {}
-    if not schedule.get("meditation_pipeline") or not slot_time:
+    if not uses_slot_topic_queues(schedule) or not slot_time:
         return []
     queues = schedule.get("slot_topic_queues") or {}
     return normalize_topic_queue(queues.get(_slot_time_key(schedule, slot_time)) or [])
@@ -606,7 +660,7 @@ def resolve_slot_topic_gen_extra(
     slot_time: str | None = None,
 ) -> str:
     schedule = schedule or {}
-    if not schedule.get("meditation_pipeline") or not slot_time:
+    if not uses_slot_topic_queues(schedule) or not slot_time:
         return ""
     extras = schedule.get("slot_topic_gen_extra") or {}
     return str(extras.get(_slot_time_key(schedule, slot_time)) or "").strip()
@@ -617,7 +671,7 @@ def resolve_slot_topic_history(
     slot_time: str | None = None,
 ) -> list[str]:
     schedule = schedule or {}
-    if not schedule.get("meditation_pipeline") or not slot_time:
+    if not uses_slot_topic_queues(schedule) or not slot_time:
         return []
     history = schedule.get("slot_topic_history") or {}
     return normalize_topic_history(history.get(_slot_time_key(schedule, slot_time)) or [])
@@ -726,6 +780,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
                 cfg = _normalize_sunor_gen_config(cfg)
             elif step_type == "image_gen":
                 cfg = _normalize_image_gen_config(cfg)
+            elif step_type == "motion_fx":
+                cfg = _normalize_motion_fx_config(cfg)
             steps.append(
                 {
                     "id": step.get("id") or _new_step_id(),
@@ -763,6 +819,8 @@ def normalize_blocks_config(raw: Any) -> dict[str, Any]:
             config = _normalize_sunor_gen_config(config)
         elif block_type == "image_gen":
             config = _normalize_image_gen_config(config)
+        elif block_type == "motion_fx":
+            config = _normalize_motion_fx_config(config)
         steps.append(
             {
                 "id": _new_step_id(),
@@ -810,6 +868,10 @@ def steps_to_ui_dict(config: Any) -> dict[str, Any]:
         "slot_prompt_modes": dict(sched.get("slot_prompt_modes") or {}),
         "slot_image_addons": dict(sched.get("slot_image_addons") or {}),
         "meditation_pipeline": bool(sched.get("meditation_pipeline", False)),
+        "postcard_pipeline": bool(sched.get("postcard_pipeline", False)),
+        "podcast_pipeline": bool(sched.get("podcast_pipeline", False)),
+        "horoscope_pipeline": bool(sched.get("horoscope_pipeline", False)),
+        "podcast_niche": str(sched.get("podcast_niche") or ""),
         "slot_topic_queues": {
             k: list(v) for k, v in dict(sched.get("slot_topic_queues") or {}).items()
         },

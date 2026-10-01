@@ -34,7 +34,7 @@ class AIStudioStep(StrEnum):
 
 
 IMAGE_MODELS = [
-    ("gpt-image-2", "GPT Images 2"),
+    ("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"),
 ]
 
 VIDEO_MODELS = [
@@ -85,6 +85,11 @@ DEFAULT_BLOCKS = {
         "prompt_mode": "ai",
         "user_description": "",
         "generated_prompt": "",
+    },
+    "motion_fx": {
+        "enabled": False,
+        "duration_s": 4,
+        "preset_group": "auto",
     },
     "tts_gen": {
         "enabled": False,
@@ -142,6 +147,10 @@ DEFAULT_BLOCKS = {
         "slot_prompt_modes": {},
         "slot_image_addons": {},
         "meditation_pipeline": False,
+        "postcard_pipeline": False,
+        "podcast_pipeline": False,
+        "horoscope_pipeline": False,
+        "podcast_niche": "",
         "slot_topic_queues": {},
         "slot_topic_history": {},
         "slot_topic_gen_extra": {},

@@ -545,11 +545,11 @@ async def test_generate_topics_passes_model_and_extra_fairy_mode():
         channel_title="Сказки",
         count=2,
         extra_prompt="только лесные герои",
-        model="gpt-5.4",
+        model="gpt-6-sol",
         mode="fairy_tale",
     )
     assert topics == ["Ёжик и луна", "Зайчик засыпает"]
-    assert oai.kwargs.get("model") == "gpt-5.4"
+    assert oai.kwargs.get("model") == "gpt-6-sol"
     assert "3–6" in oai.system or "3-6" in oai.system or "сказок" in oai.system
     assert "только лесные герои" in oai.prompt
     assert "сказок" in oai.prompt.lower() or "сказ" in oai.prompt.lower()

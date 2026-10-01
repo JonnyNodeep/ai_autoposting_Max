@@ -73,10 +73,10 @@ class OpenAIService(OpenAIClient):
         messages.append({"role": "user", "content": prompt})
 
         use_model = (model or "").strip() or self._text_model
+        # Do not pass temperature: gpt-6-* models only accept the default (1).
         response = await self._client.chat.completions.create(
             model=use_model,
             messages=messages,
-            temperature=0.8,
         )
         await self._record_usage(
             "text",

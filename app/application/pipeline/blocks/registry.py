@@ -5,6 +5,7 @@ from typing import Any
 from app.application.pipeline.blocks.drive_video import DriveVideoBlock
 from app.application.pipeline.blocks.image_gen import ImageGenBlock
 from app.application.pipeline.blocks.image_prompt import ImagePromptBlock
+from app.application.pipeline.blocks.motion_fx import MotionFxBlock
 from app.application.pipeline.blocks.post_gen import PostGenBlock
 from app.application.pipeline.blocks.story_gen import StoryGenBlock
 from app.application.pipeline.blocks.sunor_gen import SunorGenBlock
@@ -34,6 +35,7 @@ def build_default_registry() -> BlockRegistry:
     registry.register(StoryGenBlock())
     registry.register(ImagePromptBlock())
     registry.register(ImageGenBlock())
+    registry.register(MotionFxBlock())
     registry.register(VideoGenBlock())
     registry.register(TtsGenBlock())
     registry.register(SunorGenBlock())
